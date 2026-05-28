@@ -1,23 +1,24 @@
 #!/usr/bin/env python
 # -*- coding: utf-8 -*-
-"""
-Word 文本处理工具
-功能：批量替换 Word 文档中的文本，保持原有格式不变；记录编号并写入 Excel 文档
-"""
 
-import tkinter as tk
-from tkinter import ttk, filedialog, messagebox
-from pathlib import Path
-from docx import Document
-from docx.oxml.ns import qn
-import threading
+import sys
 import os
 import json
+import threading
+from pathlib import Path
+from docx import Document
+
+from PyQt5.QtWidgets import (
+    QApplication, QMainWindow, QWidget, QTabWidget, QLabel, QLineEdit,
+    QPushButton, QTableWidget, QTableWidgetItem, QProgressBar, QFileDialog,
+    QMessageBox, QHBoxLayout, QVBoxLayout, QGridLayout, QHeaderView,
+    QScrollArea, QFrame, QSizePolicy, QSpacerItem, QGroupBox
+)
+from PyQt5.QtCore import Qt, QThread, pyqtSignal, QTimer
+from PyQt5.QtGui import QFont, QPalette, QColor, QBrush
 
 
 class WordProcessor:
-    """Word 文档处理类"""
-
     MAX_FILE_SIZE = 50 * 1024 * 1024
     MAX_REPLACE_TEXT_LENGTH = 10000
 
@@ -25,22 +26,21 @@ class WordProcessor:
         pass
 
     def get_word_files(self, path):
-        """获取指定路径下的所有 Word 文件"""
         word_files = []
         try:
             if not path:
                 return []
-            
+
             if isinstance(path, (str, Path)):
                 path = Path(path)
                 if not path.exists():
                     return []
-                
+
                 try:
                     path = path.resolve()
                 except Exception:
                     return []
-                
+
                 if path.is_dir():
                     for ext in ['*.doc', '*.docx']:
                         for file in path.glob(ext):
@@ -70,45 +70,34 @@ class WordProcessor:
         return word_files
 
     def _validate_file(self, file_path):
-        """验证文件是否合法（存在、可访问、大小合规）"""
         if not file_path.exists():
             return False
-        
         if not file_path.is_file():
             return False
-        
         if file_path.stat().st_size > self.MAX_FILE_SIZE:
             return False
-        
         if not os.access(file_path, os.R_OK):
             return False
-        
         return True
 
     def _normalize_path(self, path_str):
-        """规范化路径，防止路径遍历攻击"""
         try:
             path_obj = Path(path_str)
             if not path_obj.exists():
                 return None
-            
             resolved_path = path_obj.resolve()
-            
             if '..' in str(path_obj):
                 return None
-            
             return resolved_path
         except Exception:
             return None
 
     def replace_text_in_paragraph(self, paragraph, replacements):
-        """在段落中替换文本，保持格式不变"""
         sorted_replacements = sorted(replacements.items(), key=lambda item: len(item[0]), reverse=True)
-        
+
         for old_text, new_text in sorted_replacements:
             if not old_text:
                 continue
-            
             if len(old_text) > self.MAX_REPLACE_TEXT_LENGTH:
                 continue
             if new_text and len(new_text) > self.MAX_REPLACE_TEXT_LENGTH:
@@ -118,74 +107,50 @@ class WordProcessor:
             if old_text not in paragraph_text:
                 continue
 
-            self._replace_text_preserve_format(paragraph, old_text, new_text)
+            self._replace_text_in_paragraph_clean(paragraph, old_text, new_text)
 
-    def _replace_text_preserve_format(self, paragraph, old_text, new_text):
-        """替换文本并保持格式的核心方法"""
+    def _replace_text_in_paragraph_clean(self, paragraph, old_text, new_text):
         runs = paragraph.runs
         if not runs:
             return
 
         full_text = paragraph.text
         start_pos = full_text.find(old_text)
-
         if start_pos == -1:
             return
-
         end_pos = start_pos + len(old_text)
 
-        run_positions = self._calculate_run_positions(runs)
-        affected_runs = self._find_affected_runs(run_positions, start_pos, end_pos)
-
-        if not affected_runs:
-            return
-
-        if len(affected_runs) == 1:
-            self._replace_single_run(affected_runs[0], start_pos, end_pos, new_text)
-        else:
-            self._replace_multi_runs(affected_runs, start_pos, end_pos, new_text)
-
-    def _calculate_run_positions(self, runs):
-        """计算每个 run 的位置范围"""
         run_positions = []
         current_pos = 0
-
         for i, run in enumerate(runs):
             run_len = len(run.text)
             run_positions.append((i, current_pos, current_pos + run_len, run))
             current_pos += run_len
 
-        return run_positions
+        first_run_idx = None
+        first_local_start = None
+        last_run_idx = None
+        last_local_end = None
 
-    def _find_affected_runs(self, run_positions, start_pos, end_pos):
-        """查找受替换影响的 runs"""
-        affected_runs = []
-        for i, run_start, run_end, run in run_positions:
-            if run_start < end_pos and run_end > start_pos:
-                affected_runs.append((i, run_start, run_end, run))
-        return affected_runs
+        for idx, run_start, run_end, run in run_positions:
+            overlap_start = max(run_start, start_pos)
+            overlap_end = min(run_end, end_pos)
+            if overlap_start < overlap_end:
+                if first_run_idx is None:
+                    first_run_idx = idx
+                    first_local_start = overlap_start - run_start
+                last_run_idx = idx
+                last_local_end = overlap_end - run_start
 
-    def _replace_single_run(self, run_info, start_pos, end_pos, new_text):
-        """替换单个 run 中的文本"""
-        idx, run_start, run_end, run = run_info
-        local_start = start_pos - run_start
-        local_end = end_pos - run_start
-        run.text = run.text[:local_start] + new_text + run.text[local_end:]
+        if first_run_idx is None or last_run_idx is None:
+            return
 
-    def _replace_multi_runs(self, affected_runs, start_pos, end_pos, new_text):
-        """替换跨越多个 runs 的文本"""
-        first_idx, first_start, first_end, first_run = affected_runs[0]
-        last_idx, last_start, last_end, last_run = affected_runs[-1]
-
-        first_local_start = start_pos - first_start
-        last_local_end = end_pos - last_start
-
-        first_run.text = first_run.text[:first_local_start] + new_text + last_run.text[last_local_end:]
+        first_run = runs[first_run_idx]
+        first_run.text = first_run.text[:first_local_start] + new_text + first_run.text[last_local_end:]
 
         runs_to_remove = []
-        for i in range(1, len(affected_runs)):
-            idx, run_start, run_end, run = affected_runs[i]
-            runs_to_remove.append(run)
+        for idx in range(first_run_idx + 1, last_run_idx + 1):
+            runs_to_remove.append(runs[idx])
 
         for run in runs_to_remove:
             try:
@@ -193,34 +158,17 @@ class WordProcessor:
             except Exception:
                 run.text = ""
 
-    def _copy_run_format(self, source_run, target_run):
-        """复制 run 的格式"""
-        if source_run.bold:
-            target_run.bold = True
-        if source_run.italic:
-            target_run.italic = True
-        if source_run.underline:
-            target_run.underline = source_run.underline
-        if source_run.font.size:
-            target_run.font.size = source_run.font.size
-        if source_run.font.name:
-            target_run.font.name = source_run.font.name
-        if source_run.font.color.rgb:
-            target_run.font.color.rgb = source_run.font.color.rgb
-
     def process_document(self, doc_path, replacements, output_path, callback=None):
-        """处理单个 Word 文档"""
         try:
             if not doc_path.lower().endswith('.docx'):
                 return False
-            
+
             file_size = Path(doc_path).stat().st_size
             if file_size > self.MAX_FILE_SIZE:
                 print(f"文件过大：{doc_path} ({file_size / 1024 / 1024:.2f}MB)")
                 return False
-            
+
             output_path_obj = Path(output_path).resolve()
-            
             if not str(output_path_obj).lower().endswith('.docx'):
                 return False
 
@@ -255,49 +203,51 @@ class WordProcessor:
 
 
 class ExcelProcessor:
-    """Excel 文档处理类"""
-
     def __init__(self):
         pass
 
-    def write_number_to_excel(self, excel_path, number_text, use_fixed_mode=False, fixed_number="", number_format="", callback=None):
-        """
-        将编号写入 Excel 文件
-        
-        Args:
-            excel_path: Excel 文件路径
-            number_text: 生成的编号文本
-            use_fixed_mode: 是否使用固定编号模式
-            fixed_number: 固定编号内容
-            number_format: 编号格式
-            callback: 回调函数
-        """
+    def write_number_to_excel(self, excel_path, output_path, number_text, use_fixed_mode=False, fixed_number="", number_format="", callback=None):
         try:
             from openpyxl import load_workbook
             from openpyxl.styles import Font, Alignment
 
             wb = load_workbook(excel_path)
-            ws = wb.active
 
-            ws.insert_rows(1)
-
-            ws.merge_cells('E1:F1')
-            cell_e1 = ws['E1']
-            cell_e1.font = Font(name='Times New Roman', bold=True)
-            cell_e1.alignment = Alignment(horizontal='center', vertical='center')
+            header_font = Font(name='Times New Roman', bold=True, size=11)
+            center_align = Alignment(horizontal='center', vertical='center')
 
             if use_fixed_mode and fixed_number:
-                cell_e1.value = fixed_number
+                sheet_num = 1
+                for ws in wb.worksheets:
+                    ws.insert_rows(1)
 
-                ws.merge_cells('E2:F2')
-                cell_e2 = ws['E2']
-                cell_e2.value = number_format
-                cell_e2.font = Font(name='Times New Roman', bold=True)
-                cell_e2.alignment = Alignment(horizontal='center', vertical='center')
+                    ws.merge_cells('E1:F1')
+                    cell_e1 = ws['E1']
+                    cell_e1.font = header_font
+                    cell_e1.alignment = center_align
+                    cell_e1.value = fixed_number
+
+                    ws.merge_cells('E2:F2')
+                    cell_e2 = ws['E2']
+                    cell_e2.font = header_font
+                    cell_e2.alignment = center_align
+                    sheet_num_str = str(sheet_num).zfill(2) if sheet_num <= 99 else str(sheet_num)
+                    cell_e2.value = number_format.replace("01", sheet_num_str)
+                    sheet_num += 1
             else:
-                cell_e1.value = number_text
+                sheet_num = 1
+                for ws in wb.worksheets:
+                    ws.insert_rows(1)
 
-            wb.save(excel_path)
+                    ws.merge_cells('E1:F1')
+                    cell_e1 = ws['E1']
+                    cell_e1.font = header_font
+                    cell_e1.alignment = center_align
+                    sheet_num_str = str(sheet_num).zfill(2) if sheet_num <= 99 else str(sheet_num)
+                    cell_e1.value = number_text.replace("01", sheet_num_str)
+                    sheet_num += 1
+
+            wb.save(output_path)
 
             if callback:
                 callback()
@@ -313,50 +263,281 @@ class ExcelProcessor:
             return False
 
 
-class WordProcessorGUI:
-    """Word 处理工具 GUI 类"""
+class ProcessingThread(QThread):
+    progress_updated = pyqtSignal(int, str)
+    processing_complete = pyqtSignal(int, int)
 
-    def __init__(self, root):
-        """初始化 GUI 界面"""
-        self.root = root
-        self.root.title("Word 文本处理工具")
-        
-        screen_width = root.winfo_screenwidth()
-        screen_height = root.winfo_screenheight()
-        
-        window_width = min(1000, screen_width - 100)
-        window_height = min(800, screen_height - 100)
-        
-        self.root.geometry(f"{window_width}x{window_height}")
-        
+    def __init__(self, processor, files, replacements, output_folder):
+        super().__init__()
+        self.processor = processor
+        self.files = files
+        self.replacements = replacements
+        self.output_folder = output_folder
+
+    def run(self):
+        total_files = len(self.files)
+        success_count = 0
+
+        for i, file_path in enumerate(self.files):
+            file_name = Path(file_path).name
+            base_name = Path(file_path).stem
+
+            self.progress_updated.emit(i, f"正在处理：{file_name} ({i + 1}/{total_files})")
+
+            if self.output_folder:
+                output_dir = Path(self.output_folder)
+            else:
+                file_dir = Path(file_path).parent
+                output_dir = file_dir / "修改版"
+
+            output_dir.mkdir(parents=True, exist_ok=True)
+            output_path = output_dir / f"{base_name}-修改版.docx"
+
+            success = self.processor.process_document(
+                file_path, self.replacements, str(output_path)
+            )
+
+            if success:
+                success_count += 1
+
+            progress = int(((i + 1) / total_files) * 100)
+            self.progress_updated.emit(progress, "")
+
+        self.processing_complete.emit(success_count, total_files)
+
+
+class WriteNumberThread(QThread):
+    progress_updated = pyqtSignal(int, str)
+    write_complete = pyqtSignal(bool, str)
+
+    def __init__(self, excel_processor, excel_file, output_path, number_text, use_fixed_mode, fixed_number, number_format):
+        super().__init__()
+        self.excel_processor = excel_processor
+        self.excel_file = excel_file
+        self.output_path = output_path
+        self.number_text = number_text
+        self.use_fixed_mode = use_fixed_mode
+        self.fixed_number = fixed_number
+        self.number_format = number_format
+
+    def run(self):
+        self.progress_updated.emit(0, f"正在写入编号：{self.number_text}")
+
+        success = self.excel_processor.write_number_to_excel(
+            self.excel_file,
+            self.output_path,
+            self.number_text,
+            use_fixed_mode=self.use_fixed_mode,
+            fixed_number=self.fixed_number,
+            number_format=self.number_format
+        )
+
+        self.progress_updated.emit(100, "")
+        self.write_complete.emit(success, self.number_text)
+
+
+class WordProcessorGUI(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle("Word 文本处理工具")
+        self.setMinimumSize(900, 800)
+
+        screen_geometry = QApplication.desktop().availableGeometry()
+        window_width = min(1000, screen_geometry.width() - 100)
+        window_height = min(900, screen_geometry.height() - 100)
+        self.resize(window_width, window_height)
+
         self.processor = WordProcessor()
         self.excel_processor = ExcelProcessor()
         self.selected_files = []
         self.output_folder = ""
-        
+
         self.settings_file = Path(__file__).parent / "settings.json"
         self.number_settings = self._load_number_settings()
 
-        self._create_tabbed_interface()
+        self._init_styles()
+        self._create_main_layout()
+
+    def _init_styles(self):
+        self.primary_color = "#14B8A6"
+        self.primary_dark = "#0D9488"
+        self.primary_light = "#F0FDFA"
+        self.primary_hover = "#0F766E"
+        self.title_color = "#0A7A6E"
+        self.success_color = "#10B981"
+        self.warning_color = "#F59E0B"
+        self.error_color = "#EF4444"
+        self.text_color = "#000000"
+        self.label_color = "#808080"
+        self.default_text_color = "#000000"
+        self.bg_color = "#E0F2FE"
+        self.card_bg = "#F8FAFC"
+        self.input_bg = "#FFFFFF"
+        self.border_color = "#CBD5E1"
+        self.button_bg = "#E5E7EB"
+        self.button_hover = "#D1D5DB"
+        self.button_pressed = "#9CA3AF"
+
+        font = QFont("Microsoft YaHei UI", 9)
+        QApplication.setFont(font)
+
+        self.setStyleSheet(f"""
+            QMainWindow {{
+                background-color: {self.bg_color};
+            }}
+            QWidget {{
+                font-family: Microsoft YaHei UI;
+                font-size: 9pt;
+                color: {self.text_color};
+            }}
+            QTabWidget::pane {{
+                border: 1px solid {self.border_color};
+                background-color: {self.card_bg};
+                border-radius: 6px;
+            }}
+            QTabBar::tab {{
+                background-color: #DBEAFE;
+                color: {self.text_color};
+                padding: 8px 20px;
+                margin-right: 2px;
+                border-top-left-radius: 4px;
+                border-top-right-radius: 4px;
+                min-width: 100px;
+                font-size: 9pt;
+            }}
+            QTabBar::tab:selected {{
+                background-color: {self.card_bg};
+                color: {self.primary_color};
+                font-weight: bold;
+            }}
+            QTabBar::tab:hover:!selected {{
+                background-color: #BFDBFE;
+            }}
+            QGroupBox {{
+                background-color: {self.card_bg};
+                border: 1px solid {self.border_color};
+                border-radius: 6px;
+                margin-top: 8px;
+                padding: 10px;
+                font-weight: bold;
+            }}
+            QGroupBox::title {{
+                color: {self.primary_color};
+                font-weight: bold;
+                padding-left: 6px;
+                padding-right: 6px;
+                subcontrol-origin: margin;
+                subcontrol-position: top left;
+            }}
+            QPushButton {{
+                background-color: {self.button_bg};
+                color: {self.text_color};
+                border: 1px solid {self.border_color};
+                border-radius: 6px;
+                padding: 8px 18px;
+                font-weight: bold;
+                font-size: 9pt;
+                min-width: 85px;
+            }}
+            QPushButton:hover {{
+                background-color: {self.button_hover};
+            }}
+            QPushButton:pressed {{
+                background-color: {self.button_pressed};
+            }}
+            QPushButton:disabled {{
+                background-color: #F3F4F6;
+                color: #9CA3AF;
+            }}
+            QLineEdit {{
+                border: 1px solid {self.border_color};
+                border-radius: 6px;
+                padding: 6px 10px;
+                background-color: {self.input_bg};
+                font-size: 9pt;
+                color: {self.text_color};
+            }}
+            QLineEdit:focus {{
+                border-color: {self.primary_color};
+            }}
+            QLineEdit:readonly {{
+                background-color: #F1F5F9;
+                color: {self.text_color};
+            }}
+            QTableWidget {{
+                border: 1px solid {self.border_color};
+                border-radius: 6px;
+                background-color: {self.input_bg};
+                gridline-color: {self.border_color};
+                font-size: 9pt;
+                color: {self.text_color};
+            }}
+            QTableWidget::item {{
+                padding: 6px 8px;
+                border-bottom: 1px solid {self.border_color};
+                color: {self.text_color};
+            }}
+            QTableWidget::item:selected {{
+                background-color: {self.primary_light};
+                color: {self.text_color};
+            }}
+            QHeaderView::section {{
+                background-color: #BFDBFE;
+                color: {self.text_color};
+                font-weight: bold;
+                padding: 6px 8px;
+                border: none;
+                border-bottom: 1px solid {self.primary_color};
+            }}
+            QProgressBar {{
+                border: none;
+                border-radius: 4px;
+                background-color: {self.border_color};
+                height: 12px;
+                text-align: center;
+                color: {self.text_color};
+            }}
+            QProgressBar::chunk {{
+                background: qlineargradient(spread:pad, x1:0, y1:0, x2:1, y2:0, stop:0 {self.primary_color}, stop:1 {self.primary_dark});
+                border-radius: 4px;
+            }}
+            QScrollBar::vertical {{
+                width: 8px;
+                background-color: transparent;
+                border-radius: 4px;
+            }}
+            QScrollBar::handle:vertical {{
+                background-color: {self.border_color};
+                border-radius: 4px;
+                min-height: 20px;
+            }}
+            QScrollBar::handle:vertical:hover {{
+                background-color: #9CA3AF;
+            }}
+            QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical {{
+                height: 0px;
+            }}
+            QLabel {{
+                color: {self.text_color};
+            }}
+        """)
 
     def _load_number_settings(self):
-        """从本地文件加载编号设置"""
         try:
             if self.settings_file.exists():
                 with open(self.settings_file, 'r', encoding='utf-8') as f:
                     return json.load(f)
         except Exception:
             pass
-        
+
         return {
             "prefix": "HT合同编号",
             "current_number": 1,
-            "number_format": "HT合同编号-年份-XM001-01",
+            "number_format": "HT001-2026-XM001-01",
             "fixed_number": ""
         }
 
     def _save_number_settings(self):
-        """保存编号设置到本地文件"""
         try:
             with open(self.settings_file, 'w', encoding='utf-8') as f:
                 json.dump(self.number_settings, f, ensure_ascii=False, indent=2)
@@ -364,795 +545,826 @@ class WordProcessorGUI:
             print(f"保存设置失败: {e}")
 
     def _generate_number(self):
-        """生成编号，序号自动递增，超过99后自动变为3位数"""
         number = self.number_settings["current_number"]
         if number <= 99:
             number_str = str(number).zfill(2)
         else:
             number_str = str(number)
-        
+
         number_format = self.number_settings["number_format"]
         full_number = number_format.replace("01", number_str)
-        
+
         self.number_settings["current_number"] = number + 1
         self._save_number_settings()
-        
+
         return full_number
 
-    def _create_tabbed_interface(self):
-        """创建选项卡容器界面"""
-        main_frame = ttk.Frame(self.root, padding="5")
-        main_frame.pack(fill=tk.BOTH, expand=True)
-        
-        self.notebook = ttk.Notebook(main_frame)
-        self.notebook.pack(fill=tk.BOTH, expand=True, padx=5, pady=5)
-        
-        self.tab_text_replace = ttk.Frame(self.notebook, padding="5")
-        self.tab_number_record = ttk.Frame(self.notebook, padding="5")
-        
-        self.notebook.add(self.tab_text_replace, text="文本替换")
-        self.notebook.add(self.tab_number_record, text="记录编号")
-        
+    def _generate_preview(self):
+        number = self.number_settings["current_number"]
+        if number <= 99:
+            number_str = str(number).zfill(2)
+        else:
+            number_str = str(number)
+
+        number_format = self.number_settings.get("number_format", "HT001-2026-XM001-01")
+        return number_format.replace("01", number_str)
+
+    def _create_main_layout(self):
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        main_layout = QVBoxLayout(main_widget)
+        main_layout.setContentsMargins(10, 8, 10, 8)
+        main_layout.setSpacing(6)
+
+        title_label = QLabel("Word 文本处理工具")
+        title_label.setStyleSheet(f"font-size: 14pt; font-weight: bold; color: {self.title_color};")
+        title_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(title_label)
+
+        desc_label = QLabel("批量替换 Word 文档中的文本，保持原有格式不变")
+        desc_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        desc_label.setAlignment(Qt.AlignCenter)
+        main_layout.addWidget(desc_label)
+
+        self.tab_widget = QTabWidget()
+        self.tab_widget.setStyleSheet("QTabWidget::tab-bar { alignment: center; }")
+
+        self.text_replace_tab = QWidget()
+        self.number_record_tab = QWidget()
+
+        self.tab_widget.addTab(self.text_replace_tab, "文本替换")
+        self.tab_widget.addTab(self.number_record_tab, "记录编号")
+
+        main_layout.addWidget(self.tab_widget)
+
         self._create_text_replace_tab()
         self._create_number_record_tab()
 
-    # ==================== 文本替换功能 ====================
-
     def _create_text_replace_tab(self):
-        """创建文本替换选项卡的所有组件"""
-        self._create_file_section(self.tab_text_replace)
-        self._create_file_list(self.tab_text_replace)
-        self._create_file_buttons(self.tab_text_replace)
-        self._create_replacement_section(self.tab_text_replace)
-        self._create_output_section(self.tab_text_replace)
-        self._create_progress_section(self.tab_text_replace)
-        self._create_button_section(self.tab_text_replace)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
-    def _create_file_section(self, parent):
-        """创建文件选择区域：包含浏览文件和浏览文件夹按钮"""
-        file_frame = ttk.LabelFrame(parent, text="文件选择（可选择文件夹或文件）", padding="5")
-        file_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        file_frame.columnconfigure(0, weight=1)
+        self._create_file_section(layout)
+        self._create_file_list_section(layout)
+        self._create_file_buttons(layout)
+        self._create_replacement_section(layout)
+        self._create_output_section(layout)
+        self._create_progress_section(layout)
+        self._create_button_section(layout)
 
-        browse_button_frame = ttk.Frame(file_frame)
-        browse_button_frame.grid(row=0, column=0, columnspan=4, sticky=(tk.W, tk.E), pady=(0, 5))
-        browse_button_frame.columnconfigure(1, weight=1)
+        layout.addStretch()
 
-        ttk.Label(browse_button_frame, text="选择文件/文件夹:").grid(row=0, column=0, sticky=tk.W)
+        scroll_area.setWidget(scroll_content)
 
-        self.file_path_var = tk.StringVar()
-        file_path_entry = ttk.Entry(browse_button_frame, textvariable=self.file_path_var, state='readonly')
-        file_path_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 5))
+        tab_layout = QVBoxLayout(self.text_replace_tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(0)
+        tab_layout.addWidget(scroll_area)
 
-        browse_btn = ttk.Button(browse_button_frame, text="浏览文件", command=self._browse_files)
-        browse_btn.grid(row=0, column=2, padx=(0, 5))
+    def _create_file_section(self, parent_layout):
+        group_box = QGroupBox("文件选择（可选择文件夹或文件）")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
 
-        browse_folder_btn = ttk.Button(browse_button_frame, text="浏览文件夹", command=self._browse_folder)
-        browse_folder_btn.grid(row=0, column=3)
+        browse_layout = QHBoxLayout()
+        browse_layout.setSpacing(5)
 
-        self.file_count_label = ttk.Label(file_frame, text="未选择文件", foreground="gray")
-        self.file_count_label.grid(row=1, column=0, sticky=tk.W, pady=(0, 5))
+        browse_layout.addWidget(QLabel("选择文件/文件夹:"))
 
-        self.file_path_detail_label = ttk.Label(
-            file_frame, 
-            text="", 
-            foreground="gray", 
-            font=("Microsoft YaHei UI", 9), 
-            anchor='w'
-        )
-        self.file_path_detail_label.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        self.file_path_edit = QLineEdit()
+        self.file_path_edit.setReadOnly(True)
+        self.file_path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        browse_layout.addWidget(self.file_path_edit)
 
-    def _create_file_list(self, parent):
-        """创建已选文件列表：显示已选择的 Word 文件"""
-        file_list_frame = ttk.LabelFrame(parent, text="已选文件列表", padding="5")
-        file_list_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        file_list_frame.columnconfigure(0, weight=1)
-        file_list_frame.rowconfigure(0, weight=1)
+        browse_file_btn = QPushButton("浏览文件")
+        browse_file_btn.clicked.connect(self._browse_files)
+        browse_layout.addWidget(browse_file_btn)
 
-        file_columns = ("filename",)
-        self.file_tree = ttk.Treeview(file_list_frame, columns=file_columns, show="headings", height=4)
-        self.file_tree.heading("filename", text="文件名")
-        self.file_tree.column("filename", width=800, minwidth=800)
-        
-        style = ttk.Style()
-        style.configure("FileTreeview", rowheight=30, font=("Microsoft YaHei UI", 9))
-        style.configure("FileTreeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
-        
-        file_scrollbar = ttk.Scrollbar(file_list_frame, orient=tk.VERTICAL, command=self.file_tree.yview)
-        self.file_tree.configure(yscrollcommand=file_scrollbar.set)
-        
-        self.file_tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        file_scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
-        
-        self.file_tree.bind('<Double-1>', lambda e: self._remove_selected_file())
+        browse_folder_btn = QPushButton("浏览文件夹")
+        browse_folder_btn.clicked.connect(self._browse_folder)
+        browse_layout.addWidget(browse_folder_btn)
 
-    def _create_file_buttons(self, parent):
-        """创建文件操作按钮：添加和删除文件"""
-        file_button_frame = ttk.Frame(parent)
-        file_button_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        
-        add_file_btn = ttk.Button(
-            file_button_frame,
-            text="+",
-            width=65,
-            command=self._add_file
-        )
-        add_file_btn.pack(side=tk.LEFT, padx=(0, 10))
-        
-        remove_file_btn = ttk.Button(
-            file_button_frame,
-            text="-",
-            width=65,
-            command=self._remove_selected_file
-        )
-        remove_file_btn.pack(side=tk.LEFT)
+        group_layout.addLayout(browse_layout)
 
-    def _create_replacement_section(self, parent):
-        """创建替换规则设置区域：显示可编辑的替换规则表格"""
-        replacement_frame = ttk.LabelFrame(parent, text="替换规则设置", padding="5")
-        replacement_frame.grid(row=3, column=0, sticky=(tk.W, tk.E, tk.N, tk.S), pady=(0, 5))
-        replacement_frame.columnconfigure(0, weight=1)
-        replacement_frame.rowconfigure(0, weight=1)
+        info_layout = QHBoxLayout()
+        info_layout.setSpacing(5)
 
-        self.replacement_entries = {}
-        
-        tree_frame = ttk.Frame(replacement_frame)
-        tree_frame.pack(fill=tk.BOTH, expand=True)
+        self.file_count_label = QLabel("未选择文件")
+        self.file_count_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        info_layout.addWidget(self.file_count_label)
 
-        columns = ("category", "original", "replacement")
-        tree = ttk.Treeview(tree_frame, columns=columns, show="headings", height=4)
-        
-        tree.heading("category", text="类别")
-        tree.heading("original", text="查找")
-        tree.heading("replacement", text="替换")
-        
-        tree.column("category", width=120, anchor='center', minwidth=120)
-        tree.column("original", width=350, minwidth=350)
-        tree.column("replacement", width=350, minwidth=350)
-        
-        style = ttk.Style()
-        style.configure("Treeview", rowheight=30, font=("Microsoft YaHei UI", 9))
-        style.configure("Treeview.Heading", font=("Microsoft YaHei UI", 9, "bold"))
-        
-        tree.tag_configure("category_style", foreground="#808080")
-        tree.tag_configure("editable_style", foreground="#000000")
+        self.file_path_detail_label = QLabel("")
+        self.file_path_detail_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        self.file_path_detail_label.setWordWrap(True)
+        info_layout.addWidget(self.file_path_detail_label)
+        info_layout.addStretch()
 
-        scrollbar = ttk.Scrollbar(tree_frame, orient=tk.VERTICAL, command=tree.yview)
-        tree.configure(yscrollcommand=scrollbar.set)
+        group_layout.addLayout(info_layout)
 
-        tree.pack(side=tk.LEFT, fill=tk.BOTH, expand=True)
-        scrollbar.pack(side=tk.RIGHT, fill=tk.Y)
+        parent_layout.addWidget(group_box)
 
-        tree.bind('<Double-1>', lambda e: self._edit_cell(tree))
+    def _create_file_list_section(self, parent_layout):
+        group_box = QGroupBox("已选文件列表")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
 
-        button_frame = ttk.Frame(replacement_frame)
-        button_frame.pack(fill=tk.X, pady=(5, 0))
+        self.file_table = QTableWidget()
+        self.file_table.setColumnCount(1)
+        self.file_table.setHorizontalHeaderLabels(["文件名"])
+        self.file_table.horizontalHeader().setSectionResizeMode(QHeaderView.Stretch)
+        self.file_table.verticalHeader().setVisible(False)
+        self.file_table.setSelectionBehavior(QTableWidget.SelectRows)
+        self.file_table.setEditTriggers(QTableWidget.NoEditTriggers)
+        self.file_table.doubleClicked.connect(self._remove_selected_file)
+        self.file_table.setMinimumHeight(100)
+        self.file_table.setMaximumHeight(120)
+        self.file_table.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
 
-        reset_btn = ttk.Button(
-            button_frame,
-            text="重置为默认值",
-            width=42,
-            command=lambda: self._reset_to_defaults(tree)
-        )
-        reset_btn.pack(side=tk.LEFT)
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(self.file_table)
+        scroll_area.setWidgetResizable(True)
 
-        self.replacement_entries["tree"] = tree
-        
-        self._init_default_rules(tree)
+        group_layout.addWidget(scroll_area)
 
-    def _create_output_section(self, parent):
-        """创建保存设置区域：选择输出文件保存路径"""
-        output_frame = ttk.LabelFrame(parent, text="保存设置", padding="5")
-        output_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        output_frame.columnconfigure(1, weight=1)
+        parent_layout.addWidget(group_box)
 
-        ttk.Label(output_frame, text="保存路径:").grid(row=0, column=0, sticky=tk.W)
+    def _create_file_buttons(self, parent_layout):
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(6)
 
-        self.output_path_var = tk.StringVar()
-        output_path_entry = ttk.Entry(output_frame, textvariable=self.output_path_var, state='readonly')
-        output_path_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 5))
+        add_btn = QPushButton("+ 添加文件")
+        add_btn.clicked.connect(self._add_file)
+        add_btn.setFixedHeight(29)
+        btn_layout.addWidget(add_btn)
 
-        output_browse_btn = ttk.Button(output_frame, text="浏览", command=self._browse_output)
-        output_browse_btn.grid(row=0, column=2)
+        remove_btn = QPushButton("- 删除文件")
+        remove_btn.clicked.connect(self._remove_selected_file)
+        remove_btn.setFixedHeight(29)
+        btn_layout.addWidget(remove_btn)
 
-        self.output_info_label = ttk.Label(
-            output_frame,
-            text="未选择保存路径时将按规则自动创建文件夹，默认在同级目录下新建修改版文件夹",
-            foreground="gray",
-            font=("Microsoft YaHei UI", 9)
-        )
-        self.output_info_label.grid(row=1, column=0, columnspan=3, sticky=tk.W, pady=(5, 0))
+        btn_layout.addStretch()
 
-    def _create_progress_section(self, parent):
-        """创建处理进度区域：显示处理进度条和状态信息"""
-        progress_frame = ttk.LabelFrame(parent, text="处理进度", padding="5")
-        progress_frame.grid(row=5, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        progress_frame.columnconfigure(0, weight=1)
+        parent_layout.addLayout(btn_layout)
 
-        self.progress_var = tk.IntVar()
-        progress_bar = ttk.Progressbar(progress_frame, variable=self.progress_var, maximum=100)
-        progress_bar.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+    def _create_replacement_section(self, parent_layout):
+        group_box = QGroupBox("替换规则设置")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(5)
 
-        self.progress_label = ttk.Label(progress_frame, text="就绪", foreground="gray")
-        self.progress_label.grid(row=1, column=0, sticky=tk.W)
+        self.replacement_table = QTableWidget()
+        self.replacement_table.setColumnCount(3)
+        self.replacement_table.setHorizontalHeaderLabels(["类别", "查找", "替换"])
+        self.replacement_table.setColumnWidth(0, 100)
+        self.replacement_table.setColumnWidth(1, 300)
+        self.replacement_table.setColumnWidth(2, 300)
+        self.replacement_table.horizontalHeader().setSectionResizeMode(0, QHeaderView.Fixed)
+        self.replacement_table.horizontalHeader().setSectionResizeMode(1, QHeaderView.Stretch)
+        self.replacement_table.horizontalHeader().setSectionResizeMode(2, QHeaderView.Stretch)
+        self.replacement_table.verticalHeader().setVisible(False)
+        self.replacement_table.setSelectionBehavior(QTableWidget.SelectItems)
+        self.replacement_table.cellDoubleClicked.connect(self._edit_cell)
+        self.replacement_table.horizontalHeader().setMinimumSectionSize(80)
 
-    def _create_button_section(self, parent):
-        """创建操作按钮区域：开始处理和清空设置按钮"""
-        button_frame = ttk.Frame(parent)
-        button_frame.grid(row=6, column=0, pady=(5, 0))
+        scroll_area = QScrollArea()
+        scroll_area.setWidget(self.replacement_table)
+        scroll_area.setWidgetResizable(True)
+        scroll_area.setMinimumHeight(150)
 
-        self.start_btn = ttk.Button(
-            button_frame,
-            text="开始处理",
-            command=self._start_processing,
-            width=20
-        )
-        self.start_btn.pack(side=tk.LEFT, padx=(0, 10))
+        group_layout.addWidget(scroll_area)
 
-        clear_btn = ttk.Button(
-            button_frame,
-            text="清空设置",
-            command=self._clear_all,
-            width=20
-        )
-        clear_btn.pack(side=tk.LEFT)
+        btn_layout = QHBoxLayout()
+        reset_btn = QPushButton("重置为默认值")
+        reset_btn.clicked.connect(self._reset_to_defaults)
+        reset_btn.setFixedHeight(29)
+        btn_layout.addWidget(reset_btn)
+        btn_layout.addStretch()
+
+        group_layout.addLayout(btn_layout)
+
+        parent_layout.addWidget(group_box)
+
+        self._init_default_rules()
+
+    def _create_output_section(self, parent_layout):
+        group_box = QGroupBox("保存设置")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
+
+        browse_layout = QHBoxLayout()
+        browse_layout.setSpacing(5)
+
+        browse_layout.addWidget(QLabel("保存路径:"))
+
+        self.output_path_edit = QLineEdit()
+        self.output_path_edit.setReadOnly(True)
+        self.output_path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        browse_layout.addWidget(self.output_path_edit)
+
+        browse_btn = QPushButton("浏览")
+        browse_btn.clicked.connect(self._browse_output)
+        browse_btn.setFixedHeight(29)
+        browse_layout.addWidget(browse_btn)
+
+        group_layout.addLayout(browse_layout)
+
+        self.output_info_label = QLabel("未选择保存路径时将按规则自动创建文件夹，默认在同级目录下新建修改版文件夹")
+        self.output_info_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        self.output_info_label.setWordWrap(True)
+        group_layout.addWidget(self.output_info_label)
+
+        parent_layout.addWidget(group_box)
+
+    def _create_progress_section(self, parent_layout):
+        group_box = QGroupBox("处理进度")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
+
+        self.progress_bar = QProgressBar()
+        self.progress_bar.setRange(0, 100)
+        self.progress_bar.setValue(0)
+        group_layout.addWidget(self.progress_bar)
+
+        self.progress_label = QLabel("就绪")
+        self.progress_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        group_layout.addWidget(self.progress_label)
+
+        parent_layout.addWidget(group_box)
+
+    def _create_button_section(self, parent_layout):
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+        btn_layout.setContentsMargins(0, 0, 0, 0)
+
+        self.start_btn = QPushButton("开始处理")
+        self.start_btn.clicked.connect(self._start_processing)
+        self.start_btn.setFixedHeight(33)
+        self.start_btn.setMinimumWidth(100)
+
+        clear_btn = QPushButton("清空设置")
+        clear_btn.clicked.connect(self._clear_all)
+        clear_btn.setFixedHeight(33)
+        clear_btn.setMinimumWidth(100)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.start_btn)
+        btn_layout.addWidget(clear_btn)
+        btn_layout.addStretch()
+
+        parent_layout.addLayout(btn_layout)
+
+    def _init_default_rules(self):
+        self.default_rules = [
+            ("项目编号", "HT001-2026-XM001-01", "HT001-2026-XM001-01"),
+            ("公司名称", "", ""),
+            ("系统名称", "", ""),
+            ("人员名称", "", "")
+        ]
+
+        self.replacement_table.setRowCount(4)
+        for row, (category, original, replacement) in enumerate(self.default_rules):
+            category_item = QTableWidgetItem(category)
+            category_item.setFlags(category_item.flags() & ~Qt.ItemIsEditable)
+            category_item.setForeground(QColor(self.default_text_color))
+            category_item.setTextAlignment(Qt.AlignCenter)
+            self.replacement_table.setItem(row, 0, category_item)
+
+            original_item = QTableWidgetItem(original)
+            if original:
+                original_item.setForeground(QColor(self.default_text_color))
+            self.replacement_table.setItem(row, 1, original_item)
+            self.replacement_table.setItem(row, 2, QTableWidgetItem(replacement))
+
+    def _reset_to_defaults(self):
+        self.replacement_table.clearContents()
+        self._init_default_rules()
+
+    def _edit_cell(self, row, column):
+        if column == 0:
+            return
+
+        item = self.replacement_table.item(row, column)
+        if item:
+            self.replacement_table.editItem(item)
 
     def _browse_files(self):
-        """浏览并选择多个 Word 文件"""
-        files = filedialog.askopenfilenames(
-            title="选择 Word 文件",
-            filetypes=[("Word 文件", "*.docx *.doc"), ("所有文件", "*.*")]
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "选择 Word 文件",
+            "",
+            "Word 文件 (*.docx *.doc);;所有文件 (*.*)"
         )
         if files:
             self.selected_files = list(files)
-            self.file_path_var.set(f"已选择 {len(self.selected_files)} 个文件")
-            self.file_count_label.config(
-                text=f"已选择 {len(self.selected_files)} 个文件",
-                foreground="blue"
-            )
-            
-            paths = "\n".join(self.selected_files[:5])
-            if len(self.selected_files) > 5:
-                paths += f"\n... 及其他 {len(self.selected_files) - 5} 个文件"
-            self.file_path_detail_label.config(text=paths)
-            
-            self._update_file_list()
+            self._update_file_display()
 
     def _browse_folder(self):
-        """浏览并选择包含 Word 文件的文件夹"""
-        folder = filedialog.askdirectory(title="选择包含 Word 文件的文件夹")
+        folder = QFileDialog.getExistingDirectory(self, "选择包含 Word 文件的文件夹")
         if folder:
             word_files = self.processor.get_word_files(folder)
             if word_files:
                 self.selected_files = word_files
-                self.file_path_var.set(f"已选择文件夹：{folder}，共 {len(self.selected_files)} 个文件")
-                self.file_count_label.config(
-                    text=f"已选择 {len(self.selected_files)} 个文件",
-                    foreground="blue"
-                )
-                
-                paths = "\n".join(self.selected_files[:5])
-                if len(self.selected_files) > 5:
-                    paths += f"\n... 及其他 {len(self.selected_files) - 5} 个文件"
-                self.file_path_detail_label.config(text=paths)
-                
-                self._update_file_list()
+                self._update_file_display()
             else:
-                messagebox.showwarning("警告", "该文件夹下没有找到 Word 文件")
+                QMessageBox.warning(self, "警告", "该文件夹下没有找到 Word 文件")
 
     def _add_file(self):
-        """添加额外的 Word 文件到已选列表"""
-        files = filedialog.askopenfilenames(
-            title="添加 Word 文件",
-            filetypes=[("Word 文件", "*.docx *.doc"), ("所有文件", "*.*")]
+        files, _ = QFileDialog.getOpenFileNames(
+            self,
+            "添加 Word 文件",
+            "",
+            "Word 文件 (*.docx *.doc);;所有文件 (*.*)"
         )
         if files:
             for file in files:
                 if file not in self.selected_files:
                     self.selected_files.append(file)
-            
-            self.file_path_var.set(f"已选择 {len(self.selected_files)} 个文件")
-            self.file_count_label.config(
-                text=f"已选择 {len(self.selected_files)} 个文件",
-                foreground="blue"
-            )
-            
+            self._update_file_display()
+
+    def _remove_selected_file(self):
+        selected_items = self.file_table.selectedItems()
+        if selected_items:
+            rows_to_remove = set()
+            for item in selected_items:
+                rows_to_remove.add(item.row())
+
+            for row in sorted(rows_to_remove, reverse=True):
+                file_path = self.file_table.item(row, 0).text()
+                if file_path in self.selected_files:
+                    self.selected_files.remove(file_path)
+                self.file_table.removeRow(row)
+
+            self._update_file_display()
+
+    def _update_file_display(self):
+        self.file_table.setRowCount(0)
+
+        if self.selected_files:
+            self.file_count_label.setText(f"已选择 {len(self.selected_files)} 个文件")
+            self.file_count_label.setStyleSheet(f"color: {self.success_color}; font-weight: bold;")
+            self.file_path_edit.setText(f"已选择 {len(self.selected_files)} 个文件")
+
             paths = "\n".join(self.selected_files[:5])
             if len(self.selected_files) > 5:
                 paths += f"\n... 及其他 {len(self.selected_files) - 5} 个文件"
-            self.file_path_detail_label.config(text=paths)
-            
-            self._update_file_list()
+            self.file_path_detail_label.setText(paths)
 
-    def _remove_selected_file(self):
-        """从已选列表中删除选中的文件"""
-        selected = self.file_tree.selection()
-        if selected:
-            for item in selected:
-                values = self.file_tree.item(item, 'values')
-                if values:
-                    file_path = values[0]
-                    if file_path in self.selected_files:
-                        self.selected_files.remove(file_path)
-                    self.file_tree.delete(item)
-            
-            if self.selected_files:
-                self.file_count_label.config(
-                    text=f"已选择 {len(self.selected_files)} 个文件",
-                    foreground="blue"
-                )
-                self.file_path_var.set(f"已选择 {len(self.selected_files)} 个文件")
-            else:
-                self.file_count_label.config(
-                    text="未选择文件",
-                    foreground="gray"
-                )
-                self.file_path_var.set("")
-                self.file_path_detail_label.config(text="")
-
-    def _update_file_list(self):
-        """更新文件列表显示"""
-        self.file_tree.delete(*self.file_tree.get_children())
-        for file_path in self.selected_files:
-            file_name = Path(file_path).name
-            self.file_tree.insert("", tk.END, values=(file_path,))
+            for file_path in self.selected_files:
+                row = self.file_table.rowCount()
+                self.file_table.insertRow(row)
+                self.file_table.setItem(row, 0, QTableWidgetItem(file_path))
+        else:
+            self.file_count_label.setText("未选择文件")
+            self.file_count_label.setStyleSheet(f"color: {self.label_color};")
+            self.file_path_edit.setText("")
+            self.file_path_detail_label.setText("")
 
     def _browse_output(self):
-        """浏览并选择输出文件保存路径"""
-        folder = filedialog.askdirectory(title="选择保存路径")
+        folder = QFileDialog.getExistingDirectory(self, "选择保存路径")
         if folder:
-            try:
-                self.output_folder = folder
-                self.output_path_var.set(folder)
-                self.output_info_label.config(
-                    text="已选择自定义保存路径",
-                    foreground="green"
-                )
-            except Exception as e:
-                messagebox.showerror("错误", f"无法设置保存路径：{str(e)}")
+            self.output_folder = folder
+            self.output_path_edit.setText(folder)
+            self.output_info_label.setText("已选择自定义保存路径")
+            self.output_info_label.setStyleSheet(f"color: {self.success_color}; font-size: 9pt;")
 
-    def _init_default_rules(self, tree):
-        """初始化默认替换规则"""
-        self.default_rules = [
-            ("项目编号", "HT合同编号-年份-XM001-01", "HT合同编号-年份-XM001-01"),
-            ("公司名称", "", ""),
-            ("系统名称", "", ""),
-            ("人员名称", "", "")
-        ]
-        
-        for category, original, replacement in self.default_rules:
-            tree.insert("", tk.END, values=(category, original, replacement), tags=('category_style', 'editable_style'))
-    
-    def _reset_to_defaults(self, tree):
-        """重置替换规则为默认值"""
-        tree.delete(*tree.get_children())
-        self._init_default_rules(tree)
-    
-    def _edit_cell(self, tree):
-        """编辑表格单元格（双击触发）"""
-        selected = tree.selection()
-        if not selected:
-            return
-        
-        item = selected[0]
-        
-        x = tree.winfo_pointerx() - tree.winfo_rootx()
-        y = tree.winfo_pointery() - tree.winfo_rooty()
-        
-        row = tree.identify_row(y)
-        col = tree.identify_column(x)
-        
-        if not row or not col:
-            return
-        
-        col_index = int(col.replace('#', '')) - 1
-        
-        if col_index == 0:
-            return
-        
-        values = list(tree.item(item, 'values'))
-        
-        bbox = tree.bbox(item, col)
-        if bbox is None:
-            return
-        
-        cell_x, cell_y, cell_width, cell_height = bbox
-        
-        entry = ttk.Entry(tree, font=("Microsoft YaHei UI", 9))
-        entry.place(x=cell_x, y=cell_y, width=cell_width, height=cell_height)
-        
-        current_value = values[col_index] if col_index < len(values) else ""
-        entry.insert(0, current_value)
-        entry.focus()
-        
-        self._bind_entry_events(entry, tree, item, col_index, values)
-    
-    def _bind_entry_events(self, entry, tree, item, col_index, values):
-        """绑定编辑框事件（回车保存、失焦保存、ESC取消）"""
-        def save_edit(event=None):
-            new_value = entry.get()
-            while len(values) <= col_index:
-                values.append("")
-            values[col_index] = new_value
-            tree.item(item, values=tuple(values))
-            entry.destroy()
-        
-        entry.bind('<Return>', save_edit)
-        entry.bind('<FocusOut>', save_edit)
-        entry.bind('<Escape>', lambda e: entry.destroy())
-    
     def _get_all_replacements(self):
-        """获取所有替换规则并转换为字典"""
         replacements = {}
-        tree = self.replacement_entries["tree"]
-        
-        for item in tree.get_children():
-            values = tree.item(item, 'values')
-            if len(values) >= 3:
-                category, original, replacement = values[0], values[1], values[2]
-                if original and original.strip():
-                    replacements[original.strip()] = replacement.strip() if replacement else ""
-        
+        for row in range(self.replacement_table.rowCount()):
+            original_item = self.replacement_table.item(row, 1)
+            replacement_item = self.replacement_table.item(row, 2)
+
+            if original_item:
+                original = original_item.text().strip()
+                if original:
+                    replacement = replacement_item.text().strip() if replacement_item else ""
+                    replacements[original] = replacement
+
         return replacements
 
     def _clear_all(self):
-        """清空所有设置并恢复默认状态"""
         self.selected_files = []
         self.output_folder = ""
-        self.file_path_var.set("")
-        self.output_path_var.set("")
-        self.file_count_label.config(
-            text="未选择文件",
-            foreground="gray"
-        )
-        self.output_info_label.config(
-            text="未选择保存路径时将按规则自动创建文件夹，默认在同级目录下新建修改版文件夹",
-            foreground="gray"
-        )
-        self.progress_var.set(0)
-        self.progress_label.config(text="就绪")
+        self.file_path_edit.setText("")
+        self.output_path_edit.setText("")
+        self.file_count_label.setText("未选择文件")
+        self.file_count_label.setStyleSheet(f"color: {self.label_color};")
+        self.output_info_label.setText("未选择保存路径时将按规则自动创建文件夹，默认在同级目录下新建修改版文件夹")
+        self.output_info_label.setStyleSheet(f"color: {self.label_color}; font-size: 9pt;")
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("就绪")
 
-        self.file_tree.delete(*self.file_tree.get_children())
-
-        tree = self.replacement_entries["tree"]
-        self._reset_to_defaults(tree)
+        self.file_table.setRowCount(0)
+        self._reset_to_defaults()
 
     def _start_processing(self):
-        """开始处理 Word 文档（在后台线程中执行）"""
         if not self.selected_files:
-            messagebox.showwarning("警告", "请先选择要处理的 Word 文件")
+            QMessageBox.warning(self, "警告", "请先选择要处理的 Word 文件")
             return
 
         replacements = self._get_all_replacements()
         if not replacements:
-            messagebox.showwarning("警告", "请至少添加一条替换规则")
+            QMessageBox.warning(self, "警告", "请至少添加一条替换规则")
             return
 
-        self.start_btn.config(state='disabled')
+        self.start_btn.setEnabled(False)
+        self.progress_bar.setValue(0)
+        self.progress_label.setText("准备处理...")
 
-        def process_thread():
-            total_files = len(self.selected_files)
-            success_count = 0
+        self.processing_thread = ProcessingThread(
+            self.processor,
+            self.selected_files,
+            replacements,
+            self.output_folder
+        )
+        self.processing_thread.progress_updated.connect(self._update_progress)
+        self.processing_thread.processing_complete.connect(self._processing_complete)
+        self.processing_thread.start()
 
-            for i, file_path in enumerate(self.selected_files):
-                file_name = Path(file_path).name
-                base_name = Path(file_path).stem
-
-                self.root.after(0, lambda f=file_name, idx=i + 1, total=total_files:
-                    self.progress_label.config(
-                        text=f"正在处理：{f} ({idx}/{total})"
-                    )
-                )
-
-                if self.output_folder:
-                    output_dir = Path(self.output_folder)
-                else:
-                    file_dir = Path(file_path).parent
-                    output_dir = file_dir / "修改版"
-
-                output_dir.mkdir(parents=True, exist_ok=True)
-
-                output_path = output_dir / f"{base_name}-修改版.docx"
-
-                success = self.processor.process_document(
-                    file_path,
-                    replacements,
-                    str(output_path)
-                )
-
-                if success:
-                    success_count += 1
-
-                progress = int(((i + 1) / total_files) * 100)
-                self.root.after(0, lambda p=progress: self.progress_var.set(p))
-
-            self.root.after(0, lambda: self._processing_complete(success_count, total_files))
-
-        thread = threading.Thread(target=process_thread)
-        thread.daemon = True
-        thread.start()
+    def _update_progress(self, progress, message):
+        if message:
+            self.progress_label.setText(message)
+        if progress >= 0:
+            self.progress_bar.setValue(progress)
 
     def _processing_complete(self, success_count, total_files):
-        """处理完成后的回调函数"""
-        self.start_btn.config(state='normal')
+        self.start_btn.setEnabled(True)
 
         message = f"处理完成！\n成功：{success_count}/{total_files}"
         if success_count == total_files:
             message += "\n\n修改完成，已保存"
-            messagebox.showinfo("完成", message)
+            QMessageBox.information(self, "完成", message)
         else:
-            messagebox.showwarning("完成", message)
+            QMessageBox.warning(self, "完成", message)
 
-        self.progress_label.config(text="处理完成")
-
-    # ==================== 记录编号功能 ====================
+        self.progress_label.setText("处理完成")
 
     def _create_number_record_tab(self):
-        """创建记录编号选项卡的所有组件"""
-        self._create_number_mode_section(self.tab_number_record)
-        self._create_number_format_section(self.tab_number_record)
-        self._create_number_fixed_section(self.tab_number_record)
-        self._create_number_file_section(self.tab_number_record)
-        self._create_number_progress_section(self.tab_number_record)
-        self._create_number_button_section(self.tab_number_record)
+        scroll_area = QScrollArea()
+        scroll_area.setWidgetResizable(True)
+        scroll_content = QWidget()
+        layout = QVBoxLayout(scroll_content)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(6)
 
-    def _create_number_mode_section(self, parent):
-        """创建编号模式选择区域：自动编号模式和固定编号模式"""
-        mode_frame = ttk.LabelFrame(parent, text="编号模式", padding="5")
-        mode_frame.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        mode_frame.columnconfigure(0, weight=1)
+        self._create_number_mode_section(layout)
+        self._create_number_format_section(layout)
+        self._create_number_fixed_section(layout)
+        self._create_number_file_section(layout)
+        self._create_number_progress_section(layout)
+        self._create_number_button_section(layout)
 
-        self.number_mode_var = tk.StringVar(value="auto")
-        
-        auto_mode_radio = ttk.Radiobutton(
-            mode_frame, 
-            text="自动编号模式（仅插入编号格式行）", 
-            variable=self.number_mode_var, 
-            value="auto",
-            command=self._on_mode_change
-        )
-        auto_mode_radio.grid(row=0, column=0, sticky=tk.W, padx=(0, 20))
+        layout.addStretch()
 
-        fixed_mode_radio = ttk.Radiobutton(
-            mode_frame, 
-            text="固定编号模式（插入固定编号+编号格式行）", 
-            variable=self.number_mode_var, 
-            value="fixed",
-            command=self._on_mode_change
-        )
-        fixed_mode_radio.grid(row=1, column=0, sticky=tk.W)
+        scroll_area.setWidget(scroll_content)
 
-    def _create_number_format_section(self, parent):
-        """创建编号格式设置区域：可编辑的编号格式输入框和预览"""
-        format_frame = ttk.LabelFrame(parent, text="编号格式设置", padding="5")
-        format_frame.grid(row=1, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        format_frame.columnconfigure(1, weight=1)
+        tab_layout = QVBoxLayout(self.number_record_tab)
+        tab_layout.setContentsMargins(0, 0, 0, 0)
+        tab_layout.setSpacing(0)
+        tab_layout.addWidget(scroll_area)
 
-        ttk.Label(format_frame, text="编号格式:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+    def _create_number_mode_section(self, parent_layout):
+        group_box = QGroupBox("编号模式")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(6)
 
-        self.number_format_var = tk.StringVar(value=self.number_settings.get("number_format", "HT合同编号-年份-XM001-01"))
-        format_entry = ttk.Entry(format_frame, textvariable=self.number_format_var)
-        format_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 5))
+        self.number_mode = "auto"
 
-        ttk.Label(format_frame, text="说明：使用 01 作为序号占位符，序号自动递增，超过99后自动变为3位数", 
-                 foreground="gray", font=("Microsoft YaHei UI", 9)).grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+        mode_layout = QHBoxLayout()
+        mode_layout.setSpacing(15)
 
-        preview_frame = ttk.Frame(format_frame)
-        preview_frame.grid(row=2, column=0, columnspan=2, sticky=(tk.W, tk.E), pady=(5, 0))
-        
-        ttk.Label(preview_frame, text="当前编号预览:").pack(side=tk.LEFT, padx=(0, 5))
-        self.current_number_var = tk.StringVar()
-        self.current_number_var.set(self._generate_preview())
-        preview_label = ttk.Entry(preview_frame, textvariable=self.current_number_var, state='readonly')
-        preview_label.pack(side=tk.LEFT, fill=tk.X, expand=True)
+        self.auto_radio = QPushButton("自动编号模式")
+        self.auto_radio.setCheckable(True)
+        self.auto_radio.setChecked(True)
+        self.auto_radio.clicked.connect(lambda: self._on_mode_change("auto"))
+        self.auto_radio.setFixedHeight(30)
+        self.auto_radio.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.button_bg};
+                border: 1px solid {self.border_color};
+                border-radius: 6px;
+                padding: 6px 14px;
+                text-align: center;
+                font-size: 9pt;
+                color: {self.text_color};
+            }}
+            QPushButton:hover {{
+                background-color: {self.button_hover};
+            }}
+            QPushButton:checked {{
+                background-color: {self.primary_light};
+                border-color: {self.primary_color};
+                font-weight: bold;
+            }}
+        """)
+        mode_layout.addWidget(self.auto_radio)
 
-    def _create_number_fixed_section(self, parent):
-        """创建固定编号输入区域：仅在固定编号模式下使用"""
-        fixed_frame = ttk.LabelFrame(parent, text="固定编号（仅在固定编号模式下使用）", padding="5")
-        fixed_frame.grid(row=2, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        fixed_frame.columnconfigure(1, weight=1)
+        self.fixed_radio = QPushButton("固定编号模式")
+        self.fixed_radio.setCheckable(True)
+        self.fixed_radio.clicked.connect(lambda: self._on_mode_change("fixed"))
+        self.fixed_radio.setFixedHeight(30)
+        self.fixed_radio.setStyleSheet(f"""
+            QPushButton {{
+                background-color: {self.button_bg};
+                border: 1px solid {self.border_color};
+                border-radius: 6px;
+                padding: 6px 14px;
+                text-align: center;
+                font-size: 9pt;
+                color: {self.text_color};
+            }}
+            QPushButton:hover {{
+                background-color: {self.button_hover};
+            }}
+            QPushButton:checked {{
+                background-color: {self.primary_light};
+                border-color: {self.primary_color};
+                font-weight: bold;
+            }}
+        """)
+        mode_layout.addWidget(self.fixed_radio)
 
-        ttk.Label(fixed_frame, text="固定编号:").grid(row=0, column=0, sticky=tk.W, padx=(0, 5))
+        group_layout.addLayout(mode_layout)
 
-        self.fixed_number_var = tk.StringVar(value=self.number_settings.get("fixed_number", ""))
-        fixed_entry = ttk.Entry(fixed_frame, textvariable=self.fixed_number_var)
-        fixed_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(0, 5))
+        parent_layout.addWidget(group_box)
 
-        self.fixed_info_label = ttk.Label(
-            fixed_frame,
-            text="固定编号将写入 E1:F1 合并单元格，编号格式将写入 E2:F2 合并单元格",
-            foreground="gray",
-            font=("Microsoft YaHei UI", 9)
-        )
-        self.fixed_info_label.grid(row=1, column=0, columnspan=2, sticky=tk.W, pady=(5, 0))
+    def _create_number_format_section(self, parent_layout):
+        group_box = QGroupBox("编号格式设置")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
 
-    def _on_mode_change(self):
-        """编号模式切换时的处理函数"""
-        if self.number_mode_var.get() == "fixed":
-            self.fixed_number_var.set(self.number_settings.get("fixed_number", ""))
+        format_layout = QHBoxLayout()
+        format_layout.setSpacing(5)
+
+        format_layout.addWidget(QLabel("编号格式:"))
+
+        self.number_format_edit = QLineEdit()
+        self.number_format_edit.setText(self.number_settings.get("number_format", "HT001-2026-XM001-01"))
+        self.number_format_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        format_layout.addWidget(self.number_format_edit)
+
+        group_layout.addLayout(format_layout)
+
+        desc_label = QLabel("说明：使用 01 作为序号占位符，序号自动递增，超过99后自动变为3位数")
+        desc_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        group_layout.addWidget(desc_label)
+
+        parent_layout.addWidget(group_box)
+
+    def _create_number_fixed_section(self, parent_layout):
+        self.fixed_number_group_box = QGroupBox("固定编号（仅在固定编号模式下使用）")
+        group_layout = QVBoxLayout(self.fixed_number_group_box)
+        group_layout.setSpacing(4)
+
+        fixed_layout = QHBoxLayout()
+        fixed_layout.setSpacing(5)
+
+        fixed_layout.addWidget(QLabel("固定编号:"))
+
+        self.fixed_number_edit = QLineEdit()
+        self.fixed_number_edit.setText(self.number_settings.get("fixed_number", ""))
+        self.fixed_number_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        fixed_layout.addWidget(self.fixed_number_edit)
+
+        group_layout.addLayout(fixed_layout)
+
+        info_label = QLabel("固定编号将写入 E1:F1 合并单元格，编号格式将写入 E2:F2 合并单元格")
+        info_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        group_layout.addWidget(info_label)
+
+        parent_layout.addWidget(self.fixed_number_group_box)
+
+        self.fixed_number_group_box.setVisible(self.number_mode == "fixed")
+
+    def _on_mode_change(self, mode):
+        self.number_mode = mode
+        if mode == "auto":
+            self.auto_radio.setChecked(True)
+            self.fixed_radio.setChecked(False)
+            self.fixed_number_group_box.setVisible(False)
         else:
-            self.fixed_number_var.set("")
+            self.fixed_radio.setChecked(True)
+            self.auto_radio.setChecked(False)
+            self.fixed_number_group_box.setVisible(True)
 
-    def _create_number_file_section(self, parent):
-        """创建 Excel 文件选择区域：选择要写入编号的 Excel 文件"""
-        file_frame = ttk.LabelFrame(parent, text="选择 Excel 文件", padding="5")
-        file_frame.grid(row=3, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        file_frame.columnconfigure(0, weight=1)
+    def _create_number_file_section(self, parent_layout):
+        group_box = QGroupBox("选择 Excel 文件")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
 
-        browse_button_frame = ttk.Frame(file_frame)
-        browse_button_frame.grid(row=0, column=0, sticky=(tk.W, tk.E))
-        browse_button_frame.columnconfigure(1, weight=1)
+        browse_layout = QHBoxLayout()
+        browse_layout.setSpacing(5)
 
-        ttk.Label(browse_button_frame, text="Excel 文件:").grid(row=0, column=0, sticky=tk.W)
+        browse_layout.addWidget(QLabel("Excel 文件:"))
 
-        self.excel_file_path_var = tk.StringVar()
-        excel_file_entry = ttk.Entry(browse_button_frame, textvariable=self.excel_file_path_var, state='readonly')
-        excel_file_entry.grid(row=0, column=1, sticky=(tk.W, tk.E), padx=(5, 5))
+        self.excel_file_edit = QLineEdit()
+        self.excel_file_edit.setReadOnly(True)
+        self.excel_file_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        browse_layout.addWidget(self.excel_file_edit)
 
-        browse_excel_btn = ttk.Button(browse_button_frame, text="浏览", command=self._browse_excel_file)
-        browse_excel_btn.grid(row=0, column=2)
+        browse_btn = QPushButton("浏览")
+        browse_btn.clicked.connect(self._browse_excel_file)
+        browse_btn.setFixedHeight(29)
+        browse_layout.addWidget(browse_btn)
 
-        self.excel_file_info_label = ttk.Label(
-            file_frame,
-            text="未选择文件",
-            foreground="gray"
-        )
-        self.excel_file_info_label.grid(row=1, column=0, sticky=tk.W, pady=(5, 0))
+        group_layout.addLayout(browse_layout)
 
-    def _create_number_progress_section(self, parent):
-        """创建记录编号处理进度区域：显示写入进度和状态"""
-        progress_frame = ttk.LabelFrame(parent, text="处理进度", padding="5")
-        progress_frame.grid(row=4, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
-        progress_frame.columnconfigure(0, weight=1)
+        self.excel_file_info_label = QLabel("未选择文件")
+        self.excel_file_info_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        group_layout.addWidget(self.excel_file_info_label)
 
-        self.number_progress_var = tk.IntVar()
-        number_progress_bar = ttk.Progressbar(progress_frame, variable=self.number_progress_var, maximum=100)
-        number_progress_bar.grid(row=0, column=0, sticky=(tk.W, tk.E), pady=(0, 5))
+        parent_layout.addWidget(group_box)
 
-        self.number_progress_label = ttk.Label(progress_frame, text="就绪", foreground="gray")
-        self.number_progress_label.grid(row=1, column=0, sticky=tk.W)
+        group_box2 = QGroupBox("保存设置")
+        group_layout2 = QVBoxLayout(group_box2)
+        group_layout2.setSpacing(4)
 
-    def _create_number_button_section(self, parent):
-        """创建记录编号操作按钮区域：写入编号和重置编号按钮"""
-        button_frame = ttk.Frame(parent)
-        button_frame.grid(row=5, column=0, pady=(5, 0))
+        save_layout = QHBoxLayout()
+        save_layout.setSpacing(5)
 
-        self.write_number_btn = ttk.Button(
-            button_frame,
-            text="写入编号",
-            command=self._start_write_number,
-            width=20
-        )
-        self.write_number_btn.pack(side=tk.LEFT, padx=(0, 10))
+        save_layout.addWidget(QLabel("保存路径:"))
 
-        reset_number_btn = ttk.Button(
-            button_frame,
-            text="重置编号",
-            command=self._reset_number,
-            width=20
-        )
-        reset_number_btn.pack(side=tk.LEFT)
+        self.number_output_path_edit = QLineEdit()
+        self.number_output_path_edit.setReadOnly(True)
+        self.number_output_path_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
+        save_layout.addWidget(self.number_output_path_edit)
 
-    def _generate_preview(self):
-        """生成当前编号预览（不递增序号）"""
-        number = self.number_settings["current_number"]
-        if number <= 99:
-            number_str = str(number).zfill(2)
-        else:
-            number_str = str(number)
-        
-        number_format = self.number_settings.get("number_format", "HT合同编号-年份-XM001-01")
-        return number_format.replace("01", number_str)
+        save_browse_btn = QPushButton("浏览")
+        save_browse_btn.clicked.connect(self._browse_number_output)
+        save_browse_btn.setFixedHeight(29)
+        save_layout.addWidget(save_browse_btn)
+
+        group_layout2.addLayout(save_layout)
+
+        self.number_output_info_label = QLabel("未选择保存路径时将自动保存在源文件同级目录，文件名后添加“-修改版”")
+        self.number_output_info_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        self.number_output_info_label.setWordWrap(True)
+        group_layout2.addWidget(self.number_output_info_label)
+
+        parent_layout.addWidget(group_box2)
+
+    def _create_number_progress_section(self, parent_layout):
+        group_box = QGroupBox("处理进度")
+        group_layout = QVBoxLayout(group_box)
+        group_layout.setSpacing(4)
+
+        self.number_progress_bar = QProgressBar()
+        self.number_progress_bar.setRange(0, 100)
+        self.number_progress_bar.setValue(0)
+        group_layout.addWidget(self.number_progress_bar)
+
+        self.number_progress_label = QLabel("就绪")
+        self.number_progress_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+        group_layout.addWidget(self.number_progress_label)
+
+        parent_layout.addWidget(group_box)
+
+    def _create_number_button_section(self, parent_layout):
+        btn_layout = QHBoxLayout()
+        btn_layout.setSpacing(10)
+
+        self.write_number_btn = QPushButton("写入编号")
+        self.write_number_btn.clicked.connect(self._start_write_number)
+        self.write_number_btn.setFixedHeight(33)
+        self.write_number_btn.setMinimumWidth(100)
+
+        reset_number_btn = QPushButton("重置编号")
+        reset_number_btn.clicked.connect(self._reset_number)
+        reset_number_btn.setFixedHeight(33)
+        reset_number_btn.setMinimumWidth(100)
+
+        btn_layout.addStretch()
+        btn_layout.addWidget(self.write_number_btn)
+        btn_layout.addWidget(reset_number_btn)
+        btn_layout.addStretch()
+
+        parent_layout.addLayout(btn_layout)
 
     def _browse_excel_file(self):
-        """浏览并选择 Excel 文件"""
-        file = filedialog.askopenfilename(
-            title="选择 Excel 文件",
-            filetypes=[("Excel 文件", "*.xlsx *.xls"), ("所有文件", "*.*")]
+        file, _ = QFileDialog.getOpenFileName(
+            self,
+            "选择 Excel 文件",
+            "",
+            "Excel 文件 (*.xlsx *.xls);;所有文件 (*.*)"
         )
         if file:
-            self.excel_file_path_var.set(file)
-            self.excel_file_info_label.config(
-                text=f"已选择：{Path(file).name}",
-                foreground="blue"
-            )
+            self.excel_file_path = file
+            self.excel_file_edit.setText(file)
+            self.excel_file_info_label.setText(f"已选择：{Path(file).name}")
+            self.excel_file_info_label.setStyleSheet(f"color: {self.success_color};")
+            self.number_output_path_edit.setText("")
+            self.number_output_info_label.setText("未选择保存路径时将自动保存在源文件同级目录，文件名后添加“-修改版”")
+            self.number_output_info_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
+
+    def _browse_number_output(self):
+        folder = QFileDialog.getExistingDirectory(self, "选择保存路径")
+        if folder:
+            self.number_output_folder = folder
+            self.number_output_path_edit.setText(folder)
+            self.number_output_info_label.setText("已选择自定义保存路径")
+            self.number_output_info_label.setStyleSheet(f"color: {self.success_color}; font-size: 8pt;")
 
     def _start_write_number(self):
-        """开始写入编号到 Excel 文件（在后台线程中执行）"""
-        excel_file = self.excel_file_path_var.get()
-        if not excel_file:
-            messagebox.showwarning("警告", "请先选择要写入的 Excel 文件")
+        if not hasattr(self, 'excel_file_path') or not self.excel_file_path:
+            QMessageBox.warning(self, "警告", "请先选择要写入的 Excel 文件")
             return
 
-        number_format = self.number_format_var.get().strip()
+        number_format = self.number_format_edit.text().strip()
         if not number_format:
-            messagebox.showwarning("警告", "请输入编号格式")
+            QMessageBox.warning(self, "警告", "请输入编号格式")
             return
 
         self.number_settings["number_format"] = number_format
-        
-        use_fixed_mode = self.number_mode_var.get() == "fixed"
+
+        use_fixed_mode = self.number_mode == "fixed"
         fixed_number = ""
-        
+
         if use_fixed_mode:
-            fixed_number = self.fixed_number_var.get().strip()
+            fixed_number = self.fixed_number_edit.text().strip()
             if not fixed_number:
-                messagebox.showwarning("警告", "请输入固定编号")
+                QMessageBox.warning(self, "警告", "请输入固定编号")
                 return
             self.number_settings["fixed_number"] = fixed_number
-        
+
         self._save_number_settings()
 
-        self.write_number_btn.config(state='disabled')
-        self.number_progress_label.config(text="正在处理...")
-        self.number_progress_var.set(0)
-
-        def write_thread():
-            number_text = self._generate_number()
-            
-            self.root.after(0, lambda: self.number_progress_label.config(text=f"正在写入编号：{number_text}"))
-            
-            success = self.excel_processor.write_number_to_excel(
-                excel_file,
-                number_text,
-                use_fixed_mode=use_fixed_mode,
-                fixed_number=fixed_number,
-                number_format=number_format
-            )
-            
-            self.root.after(0, lambda: self.number_progress_var.set(100))
-            
-            if success:
-                self.root.after(0, lambda: self._write_number_complete(number_text, use_fixed_mode, fixed_number))
-            else:
-                self.root.after(0, lambda: self._write_number_failed())
-
-        thread = threading.Thread(target=write_thread)
-        thread.daemon = True
-        thread.start()
-
-    def _write_number_complete(self, number_text, use_fixed_mode, fixed_number):
-        """编号写入成功后的回调函数"""
-        self.write_number_btn.config(state='normal')
-        self.current_number_var.set(self._generate_preview())
-        
-        if use_fixed_mode:
-            self.number_progress_label.config(text=f"写入成功！固定编号：{fixed_number}，格式编号：{number_text}")
-            messagebox.showinfo("完成", f"编号写入成功！\n\n固定编号（E1:F1）：{fixed_number}\n格式编号（E2:F2）：{number_text}")
+        output_path = getattr(self, 'number_output_folder', None)
+        if output_path:
+            src_file = Path(self.excel_file_path)
+            output_file = Path(output_path) / f"{src_file.stem}-修改版{src_file.suffix}"
         else:
-            self.number_progress_label.config(text=f"写入成功！编号：{number_text}")
-            messagebox.showinfo("完成", f"编号写入成功！\n\n编号（E1:F1）：{number_text}")
+            src_file = Path(self.excel_file_path)
+            output_file = src_file.parent / f"{src_file.stem}-修改版{src_file.suffix}"
 
-    def _write_number_failed(self):
-        """编号写入失败后的回调函数"""
-        self.write_number_btn.config(state='normal')
-        self.number_progress_label.config(text="写入失败", foreground="red")
-        messagebox.showerror("错误", "编号写入失败，请检查文件是否被占用或格式是否正确")
+        self.write_number_btn.setEnabled(False)
+        self.number_progress_label.setText("正在处理...")
+        self.number_progress_bar.setValue(0)
+
+        number_text = self._generate_number()
+
+        self.write_thread = WriteNumberThread(
+            self.excel_processor,
+            self.excel_file_path,
+            str(output_file),
+            number_text,
+            use_fixed_mode,
+            fixed_number,
+            number_format
+        )
+        self.write_thread.progress_updated.connect(self._update_number_progress)
+        self.write_thread.write_complete.connect(self._write_number_complete)
+        self.write_thread.start()
+
+    def _update_number_progress(self, progress, message):
+        if message:
+            self.number_progress_label.setText(message)
+        if progress >= 0:
+            self.number_progress_bar.setValue(progress)
+
+    def _write_number_complete(self, success, number_text):
+        self.write_number_btn.setEnabled(True)
+
+        use_fixed_mode = self.number_mode == "fixed"
+        fixed_number = getattr(self, 'fixed_number_edit', None)
+        fixed_number = fixed_number.text().strip() if fixed_number else ""
+
+        if success:
+            if use_fixed_mode:
+                self.number_progress_label.setText(f"写入成功！固定编号：{fixed_number}，格式编号：{number_text}")
+                QMessageBox.information(self, "完成", f"编号写入成功！\n\n固定编号（E1:F1）：{fixed_number}\n格式编号（E2:F2）：{number_text}")
+            else:
+                self.number_progress_label.setText(f"写入成功！编号：{number_text}")
+                QMessageBox.information(self, "完成", f"编号写入成功！\n\n编号（E1:F1）：{number_text}")
+        else:
+            self.number_progress_label.setText("写入失败")
+            self.number_progress_label.setStyleSheet(f"color: {self.error_color};")
+            QMessageBox.critical(self, "错误", "编号写入失败，请检查文件是否被占用或格式是否正确")
 
     def _reset_number(self):
-        """重置编号序号为 01"""
-        if messagebox.askyesno("确认", "确定要重置编号吗？当前编号将恢复为 01"):
+        reply = QMessageBox.question(
+            self,
+            "确认",
+            "确定要重置编号吗？当前编号将恢复为 01",
+            QMessageBox.Yes | QMessageBox.No
+        )
+        if reply == QMessageBox.Yes:
             self.number_settings["current_number"] = 1
             self._save_number_settings()
-            self.current_number_var.set(self._generate_preview())
-            messagebox.showinfo("完成", "编号已重置为 01")
+            QMessageBox.information(self, "完成", "编号已重置为 01")
 
 
 def main():
-    """主函数：启动应用程序"""
-    root = tk.Tk()
-    root.title("Word 文本处理工具")
-    root.geometry("900x700")
+    app = QApplication(sys.argv)
 
-    try:
-        from tkinter import font
-        default_font = font.Font(family="Microsoft YaHei UI", size=9)
-        root.option_add("*Font", default_font)
-    except:
-        pass
+    font = QFont("Microsoft YaHei UI", 10)
+    app.setFont(font)
 
-    app = WordProcessorGUI(root)
-    root.mainloop()
+    window = WordProcessorGUI()
+    window.show()
+
+    sys.exit(app.exec_())
 
 
 if __name__ == "__main__":
