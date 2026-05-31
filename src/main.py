@@ -232,19 +232,17 @@ class ExcelProcessor:
                     cell_e2.font = header_font
                     cell_e2.alignment = center_align
                     sheet_num_str = str(sheet_num).zfill(2) if sheet_num <= 99 else str(sheet_num)
-                    cell_e2.value = number_format.replace("01", sheet_num_str)
+                    cell_e2.value = number_format.replace("yy", sheet_num_str)
                     sheet_num += 1
             else:
                 sheet_num = 1
                 for ws in wb.worksheets:
-                    ws.insert_rows(1)
-
                     ws.merge_cells('E1:F1')
                     cell_e1 = ws['E1']
                     cell_e1.font = header_font
                     cell_e1.alignment = center_align
                     sheet_num_str = str(sheet_num).zfill(2) if sheet_num <= 99 else str(sheet_num)
-                    cell_e1.value = number_text.replace("01", sheet_num_str)
+                    cell_e1.value = number_format.replace("yy", sheet_num_str)
                     sheet_num += 1
 
             wb.save(output_path)
@@ -552,7 +550,7 @@ class WordProcessorGUI(QMainWindow):
             number_str = str(number)
 
         number_format = self.number_settings["number_format"]
-        full_number = number_format.replace("01", number_str)
+        full_number = number_format.replace("yy", number_str)
 
         self.number_settings["current_number"] = number + 1
         self._save_number_settings()
@@ -566,8 +564,8 @@ class WordProcessorGUI(QMainWindow):
         else:
             number_str = str(number)
 
-        number_format = self.number_settings.get("number_format", "HT001-2026-XM001-01")
-        return number_format.replace("01", number_str)
+        number_format = self.number_settings.get("number_format", "HT001-2026-XM001-yy")
+        return number_format.replace("yy", number_str)
 
     def _create_main_layout(self):
         main_widget = QWidget()
@@ -1101,13 +1099,13 @@ class WordProcessorGUI(QMainWindow):
         format_layout.addWidget(QLabel("编号格式:"))
 
         self.number_format_edit = QLineEdit()
-        self.number_format_edit.setText(self.number_settings.get("number_format", "HT001-2026-XM001-01"))
+        self.number_format_edit.setText(self.number_settings.get("number_format", "HT001-2026-XM001-yy"))
         self.number_format_edit.setSizePolicy(QSizePolicy.Expanding, QSizePolicy.Fixed)
         format_layout.addWidget(self.number_format_edit)
 
         group_layout.addLayout(format_layout)
 
-        desc_label = QLabel("说明：使用 01 作为序号占位符，序号自动递增，超过99后自动变为3位数")
+        desc_label = QLabel("说明：使用 yy 作为序号占位符，序号自动递增，超过99后自动变为3位数")
         desc_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
         group_layout.addWidget(desc_label)
 
