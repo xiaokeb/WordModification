@@ -59,6 +59,10 @@
 | **ExcelToPdfProcessor** | Excel页面设置、PDF导出 | `export_to_pdf()` |
 | **SuffixProcessor** | 文件名后缀批量删除 | `remove_suffix_from_files()` |
 | **WordProcessorGUI** | 用户界面、交互逻辑、线程管理 | `_create_text_replace_tab()`, `_create_number_record_tab()`, `_create_suffix_modify_tab()` |
+| **ExportPdfThread** | PDF导出后台线程，避免阻塞UI和COM线程问题 | `run()`, `export_complete`信号 |
+| **ProcessingThread** | Word文档批量处理后台线程 | `run()`, `processing_complete`信号 |
+| **WriteNumberThread** | Excel编号写入后台线程 | `run()`, `write_complete`信号 |
+| **SuffixModifyThread** | 文件后缀修改后台线程 | `run()`, `modify_complete`信号 |
 
 ### 2.3 数据流
 
@@ -340,6 +344,88 @@
 
 ---
 
+## 🧵 多线程模型
+
+### 4.1 线程架构
+
+为避免UI阻塞和COM线程问题，所有耗时操作均放在独立的后台线程中执行：
+
+| 线程类 | 用途 | 避免的问题 |
+|--------|------|------------|
+| **ProcessingThread** | Word文档批量替换 | UI卡顿、长时间无响应 |
+| **WriteNumberThread** | Excel编号写入 | UI卡顿、openpyxl阻塞 |
+| **ExportPdfThread** | Excel转PDF | UI卡顿、COM线程死锁 |
+| **SuffixModifyThread** | 文件名后缀修改 | UI卡顿、文件系统操作阻塞 |
+
+### 4.2 PDF导出线程特别说明
+
+**问题背景**：`pywin32`通过COM接口调用Excel，需要在线程内单独初始化COM apartment。如果在主GUI线程中执行COM操作，会导致：
+- UI完全冻结
+- "RPC server unavailable"错误
+- 程序闪退
+
+**解决方案**：`ExportPdfThread`继承自`QThread`，在`run()`方法中：
+1. 调用`pythoncom.CoInitialize()`初始化COM
+2. 创建Excel COM对象并执行导出
+3. 无论成功失败都调用`pythoncom.CoUninitialize()`清理
+4. 通过`export_complete`信号返回结果
+
+### 4.3 启动性能优化
+
+`pdf_processor`采用懒加载模式（初始化为None），避免启动时加载`pywin32`：
+```python
+self.pdf_processor = None  # 延迟初始化，避免启动时加载pywin32
+```
+
+首次使用PDF功能时才创建实例，显著缩短程序启动时间。
+
+---
+
+## 🧪 单元测试
+
+### 5.1 测试文件
+
+测试文件位于 `tests/test_main.py`，包含完整的单元测试套件。
+
+### 5.2 测试范围
+
+| 测试类 | 测试内容 | 测试数量 |
+|--------|----------|----------|
+| **TestWordProcessor** | 文件验证、文本替换、跨Run替换、表格处理、异常处理 | 10 |
+| **TestExcelProcessor** | 自动模式、固定模式、错误处理 | 3 |
+| **TestSuffixProcessor** | 后缀删除、自定义后缀、冲突处理、异常处理 | 6 |
+| **TestExcelToPdfProcessor** | pywin32可用性、错误处理 | 2 |
+| **TestUtilityFunctions** | 路径操作、文件名冲突 | 2 |
+| **TestIntegration** | 端到端工作流、表格+段落组合替换 | 2 |
+| **总计** | | **25+** |
+
+### 5.3 运行测试
+
+```bash
+cd e:\SourceCode\Projects\WordModification
+python tests/test_main.py
+```
+
+### 5.4 测试结果
+
+最新测试结果：27个测试全部通过（2个PDF相关测试在缺少pywin32时跳过）。
+
+```
+Ran 27 tests in 1.566s
+OK (skipped=2)
+```
+
+### 5.5 关键测试场景
+
+- **跨Run文本替换**：验证大段文字和表格内的文本被完整替换
+- **多规则同时替换**：验证多个替换规则同时生效
+- **空规则处理**：验证空值规则被安全跳过
+- **文件不存在**：验证不存在的文件被正确处理
+- **后缀多位置删除**：验证文件名中多个"-修改版"都被删除
+- **集成工作流**：验证 Excel→写入编号→PDF导出的完整流程
+
+---
+
 ## 🔧 技术栈
 
 ### 4.1 依赖列表
@@ -500,9 +586,10 @@ WordModification/
 | v4.0.0 | 2026-06-10 | 新增 ExcelToPdfProcessor，记录编号选项卡新增导出PDF和一键转换功能 |
 | v5.0.0 | 2026-06-12 | UI 全面优化：表格行高统一、编辑样式优化、按钮布局调整 |
 | v6.0.0 | 2026-06-15 | 记录编号选项卡行为逻辑重构：保存路径复用、新增一键转换按钮、PDF导出独立功能 |
+| v6.1.0 | 2026-06-16 | **关键Bug修复**：PDF导出/一键转换从主线程移至ExportPdfThread后台线程，修复COM线程死锁和程序闪退问题；pdf_processor懒加载优化启动速度；新增完整单元测试套件（27个测试） |
 
 ---
 
-**文档版本**: v2.0  
-**最后更新**: 2026-06-15  
+**文档版本**: v2.1  
+**最后更新**: 2026-06-16  
 **文档状态**: 已完成

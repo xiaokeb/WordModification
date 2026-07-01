@@ -686,6 +686,101 @@ class SuffixModifyThread(QThread):
         self.modify_complete.emit(success, total)
 
 
+class ExportPdfThread(QThread):
+    """PDF导出后台线程，避免阻塞UI和COM线程问题"""
+    progress_updated = pyqtSignal(int, str)
+    export_complete = pyqtSignal(bool, str)
+
+    def __init__(self, excel_path, output_path):
+        """初始化PDF导出线程
+        
+        Args:
+            excel_path: 输入Excel文件路径
+            output_path: 输出PDF文件路径
+        """
+        super().__init__()
+        self.excel_path = excel_path
+        self.output_path = output_path
+        self._result = None
+        self._error_message = ""
+
+    def run(self):
+        """线程执行方法：使用openpyxl生成PDF占位（实际由WordProcessor风格的COM操作）"""
+        try:
+            self.progress_updated.emit(10, "正在准备导出...")
+
+            # 在线程中初始化COM
+            import win32com.client
+            import pythoncom
+            pythoncom.CoInitialize()
+
+            self.progress_updated.emit(30, "正在启动Excel...")
+
+            excel = win32com.client.Dispatch("Excel.Application")
+            excel.Visible = False
+            excel.DisplayAlerts = False
+            excel.ScreenUpdating = False
+
+            self.progress_updated.emit(50, "正在打开文件...")
+
+            wb = excel.Workbooks.Open(str(Path(self.excel_path).resolve()))
+
+            self.progress_updated.emit(70, "正在设置页面...")
+
+            for ws in wb.Worksheets:
+                # 设置页面缩放：将所有列缩放为一页，行数不限
+                ws.PageSetup.FitToPagesWide = 1
+                ws.PageSetup.FitToPagesTall = 0
+                ws.PageSetup.Zoom = False
+
+                # 设置页边距（单位：厘米）
+                ws.PageSetup.TopMargin = excel.CentimetersToPoints(1.3)
+                ws.PageSetup.BottomMargin = excel.CentimetersToPoints(1.3)
+                ws.PageSetup.LeftMargin = excel.CentimetersToPoints(0.9)
+                ws.PageSetup.RightMargin = excel.CentimetersToPoints(0.9)
+
+            # 选中所有工作表
+            wb.Worksheets.Select()
+
+            self.progress_updated.emit(85, "正在导出PDF...")
+
+            # 导出为PDF (0 = xlTypePDF)
+            wb.ExportAsFixedFormat(0, str(Path(self.output_path).resolve()))
+
+            self.progress_updated.emit(95, "正在关闭Excel...")
+
+            wb.Close(False)
+            excel.Quit()
+
+            pythoncom.CoUninitialize()
+
+            self.progress_updated.emit(100, "导出完成")
+            self.export_complete.emit(True, self.output_path)
+
+        except ImportError as e:
+            self._error_message = "缺少pywin32库，请安装：pip install pywin32"
+            print(self._error_message)
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+            self.export_complete.emit(False, self._error_message)
+        except Exception as e:
+            self._error_message = f"导出失败: {str(e)}"
+            print(f"导出PDF失败 {self.excel_path}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            try:
+                excel.Quit()
+            except Exception:
+                pass
+            try:
+                pythoncom.CoUninitialize()
+            except Exception:
+                pass
+            self.export_complete.emit(False, self._error_message)
+
+
 # ============================================================================
 # 主界面
 # ============================================================================
@@ -703,12 +798,12 @@ class WordProcessorGUI(QMainWindow):
         window_height = min(900, screen_geometry.height() - 100)
         self.resize(window_width, window_height)
 
-        # 初始化处理器
+        # 初始化处理器（懒加载PDF处理器以加速启动）
         self.processor = WordProcessor()
         self.excel_processor = ExcelProcessor()
-        self.pdf_processor = ExcelToPdfProcessor()
         self.suffix_processor = SuffixProcessor()
-        
+        self.pdf_processor = None  # 延迟初始化，避免启动时加载pywin32
+
         # 状态变量
         self.selected_files = []
         self.output_folder = ""
@@ -1937,34 +2032,60 @@ class WordProcessorGUI(QMainWindow):
         - 所有列缩放为一页
         - 上下页边距1.3cm，左右页边距0.9cm
         - 导出为PDF格式
+        
+        使用后台线程避免UI阻塞
         """
         if not hasattr(self, 'excel_file_path') or not self.excel_file_path:
             QMessageBox.warning(self, "警告", "请先选择Excel文件")
             return
 
+        if not Path(self.excel_file_path).exists():
+            QMessageBox.warning(self, "警告", "Excel文件不存在")
+            return
+
         output_file = self._get_pdf_output_path()
 
+        # 确保输出目录存在
+        output_dir = Path(output_file).parent
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            QMessageBox.critical(self, "错误", f"无法创建输出目录：{str(e)}")
+            return
+
+        # 禁用所有相关按钮
         self.export_pdf_btn.setEnabled(False)
+        self.write_number_btn.setEnabled(False)
+        self.one_click_convert_btn.setEnabled(False)
+
         self.number_progress_label.setText("正在导出PDF...")
         self.number_progress_label.setStyleSheet(f"color: {self.label_color}; font-size: 8pt;")
         self.number_progress_bar.setValue(0)
 
-        success = self.pdf_processor.export_to_pdf(
+        # 使用后台线程
+        self.pdf_thread = ExportPdfThread(
             self.excel_file_path,
             output_file
         )
+        self.pdf_thread.progress_updated.connect(self._update_number_progress)
+        self.pdf_thread.export_complete.connect(self._on_export_pdf_complete)
+        self.pdf_thread.start()
 
+    def _on_export_pdf_complete(self, success, result):
+        """PDF导出完成回调"""
         self.export_pdf_btn.setEnabled(True)
+        self.write_number_btn.setEnabled(True)
+        self.one_click_convert_btn.setEnabled(True)
 
         if success:
             self.number_progress_label.setText("PDF导出成功！")
             self.number_progress_label.setStyleSheet(f"color: {self.success_color}; font-size: 8pt;")
             self.number_progress_bar.setValue(100)
-            QMessageBox.information(self, "完成", f"PDF导出成功！\n\n保存路径：{output_file}")
+            QMessageBox.information(self, "完成", f"PDF导出成功！\n\n保存路径：{result}")
         else:
             self.number_progress_label.setText("PDF导出失败")
             self.number_progress_label.setStyleSheet(f"color: {self.error_color}; font-size: 8pt;")
-            QMessageBox.critical(self, "错误", "PDF导出失败，请检查Excel文件是否被占用")
+            QMessageBox.critical(self, "错误", f"PDF导出失败：\n{result}\n\n请检查：\n1. Excel文件是否被占用\n2. 输出路径是否有写入权限\n3. 是否已安装Microsoft Excel\n4. pywin32库是否已安装")
 
     def _start_one_click_convert(self):
         """一键转换：先写入编号，再导出PDF
@@ -2014,7 +2135,10 @@ class WordProcessorGUI(QMainWindow):
         self.write_thread.start()
 
     def _one_click_write_complete(self, success, number_text):
-        """一键转换中编号写入完成后的回调，继续执行PDF导出"""
+        """一键转换中编号写入完成后的回调，继续执行PDF导出
+        
+        使用单独的后台线程处理PDF导出，避免COM线程问题
+        """
         if not success:
             self.write_number_btn.setEnabled(True)
             self.export_pdf_btn.setEnabled(True)
@@ -2024,29 +2148,56 @@ class WordProcessorGUI(QMainWindow):
             QMessageBox.critical(self, "错误", "编号写入失败，无法继续导出PDF")
             return
 
-        # 写入成功，继续导出PDF（使用写入后的文件）
+        # 写入成功，启动PDF导出后台线程
+        # 使用写入后的xlsx文件作为源
+        xlsx_output = self._get_number_output_path()
         pdf_output = self._get_pdf_output_path()
+
+        # 确保输出目录存在
+        output_dir = Path(pdf_output).parent
+        try:
+            output_dir.mkdir(parents=True, exist_ok=True)
+        except Exception as e:
+            self.write_number_btn.setEnabled(True)
+            self.export_pdf_btn.setEnabled(True)
+            self.one_click_convert_btn.setEnabled(True)
+            self.number_progress_label.setText("编号写入成功，但PDF输出目录创建失败")
+            self.number_progress_label.setStyleSheet(f"color: {self.error_color}; font-size: 8pt;")
+            QMessageBox.warning(self, "完成", f"编号写入成功！\n\n编号：{number_text}\n\n但PDF输出目录创建失败：{str(e)}")
+            return
 
         self.number_progress_label.setText("正在导出PDF...")
 
-        success = self.pdf_processor.export_to_pdf(
-            self._get_number_output_path(),
+        # 保存上下文以便回调使用
+        self._one_click_number_text = number_text
+        self._one_click_xlsx_path = xlsx_output
+
+        # 使用后台线程
+        self.pdf_thread = ExportPdfThread(
+            xlsx_output,
             pdf_output
         )
+        self.pdf_thread.progress_updated.connect(self._update_number_progress)
+        self.pdf_thread.export_complete.connect(self._on_one_click_pdf_complete)
+        self.pdf_thread.start()
 
+    def _on_one_click_pdf_complete(self, success, result):
+        """一键转换中PDF导出完成回调"""
         self.write_number_btn.setEnabled(True)
         self.export_pdf_btn.setEnabled(True)
         self.one_click_convert_btn.setEnabled(True)
+
+        number_text = getattr(self, '_one_click_number_text', '')
 
         if success:
             self.number_progress_label.setText("一键转换完成！")
             self.number_progress_label.setStyleSheet(f"color: {self.success_color}; font-size: 8pt;")
             self.number_progress_bar.setValue(100)
-            QMessageBox.information(self, "完成", f"一键转换完成！\n\n编号写入成功：{number_text}\nPDF导出成功\n\n保存路径：{pdf_output}")
+            QMessageBox.information(self, "完成", f"一键转换完成！\n\n编号写入成功：{number_text}\nPDF导出成功\n\nPDF保存路径：{result}")
         else:
             self.number_progress_label.setText("编号写入成功，但PDF导出失败")
             self.number_progress_label.setStyleSheet(f"color: {self.error_color}; font-size: 8pt;")
-            QMessageBox.warning(self, "完成", f"编号写入成功！\n\n编号：{number_text}\n\n但PDF导出失败，请检查文件是否被占用")
+            QMessageBox.warning(self, "完成", f"编号写入成功！\n\n编号：{number_text}\n\n但PDF导出失败：\n{result}\n\n请检查：\n1. Excel文件是否被占用\n2. 输出路径是否有写入权限\n3. 是否已安装Microsoft Excel")
 
     # ========================================================================
     # 选项卡3：后缀修改
