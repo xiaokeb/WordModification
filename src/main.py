@@ -688,23 +688,18 @@ class SuffixProcessor:
 
                 original_name = path.stem
                 extension = path.suffix
-                
+
                 # 删除文件名中所有的后缀（包括中间和末尾）
                 new_stem = original_name.replace(suffix, "")
-                
+
                 # 只有当名称实际发生变化时才重命名
                 if new_stem != original_name and new_stem:
                     new_name = new_stem + extension
                     new_path = path.parent / new_name
-                    
-                    # 避免文件名冲突
+
+                    # 如果目标文件已存在，直接用源文件替换目标文件
                     if new_path.exists():
-                        counter = 1
-                        while new_path.exists():
-                            new_name = f"{new_stem}_{counter}{extension}"
-                            new_path = path.parent / new_name
-                            counter += 1
-                    
+                        new_path.unlink()
                     path.rename(new_path)
                     success_count += 1
 
