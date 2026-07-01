@@ -191,15 +191,26 @@
 
 ---
 
-### 3.3 ExcelToPdfProcessor 类（新增）
+### 3.3 ExcelToPdfProcessor 类
 
 **功能定位**：负责 Excel 文件的页面设置和 PDF 导出
 
 **文件位置**：`src/main.py`
 
-**依赖**：`pywin32`（通过 COM 接口调用 Excel 应用程序）
+**支持多种导出方法（按优先级自动检测）**：
+
+| 优先级 | 方法 | 依赖 | 效果 |
+|--------|------|------|------|
+| 1 | pywin32 (COM) | pywin32 + Microsoft Excel | 最佳（保留Excel原格式） |
+| 2 | LibreOffice CLI | LibreOffice | 良好（跨平台） |
+| 3 | reportlab | reportlab | 备选（纯Python） |
+| - | 无可用 | - | 显示安装提示 |
 
 #### 3.3.1 核心方法
+
+##### `_detect_method()`
+
+自动检测可用的PDF导出方法，结果保存在`self.method`中。
 
 ##### `export_to_pdf(excel_path, output_path, callback=None)`
 
@@ -211,12 +222,18 @@
 | `output_path` | str | 输出 PDF 文件路径 |
 | `callback` | function | 完成回调 |
 
-**页面设置**：
+**页面设置**（pywin32方式）：
 - 缩放：将所有列缩放为一页（FitToPagesWide=1, FitToPagesTall=0）
 - 页边距：上下 1.3cm，左右 0.9cm
 - 选中所有工作表后统一导出
 
-**返回值**：`bool` - 导出成功返回 True
+**返回值**：`tuple` - (成功: bool, 消息: str)
+
+##### 私有方法
+
+- `_export_with_pywin32()` - 使用COM接口导出（效果最佳）
+- `_export_with_libreoffice()` - 使用LibreOffice命令行导出
+- `_export_with_reportlab()` - 使用纯Python库导出（备选）
 
 ---
 
@@ -587,6 +604,7 @@ WordModification/
 | v5.0.0 | 2026-06-12 | UI 全面优化：表格行高统一、编辑样式优化、按钮布局调整 |
 | v6.0.0 | 2026-06-15 | 记录编号选项卡行为逻辑重构：保存路径复用、新增一键转换按钮、PDF导出独立功能 |
 | v6.1.0 | 2026-06-16 | **关键Bug修复**：PDF导出/一键转换从主线程移至ExportPdfThread后台线程，修复COM线程死锁和程序闪退问题；pdf_processor懒加载优化启动速度；新增完整单元测试套件（27个测试） |
+| v6.2.0 | 2026-06-17 | **PDF导出多方法支持**：ExcelToPdfProcessor自动检测pywin32/LibreOffice/reportlab三种导出方法，按优先级回退；解决用户环境无pywin32时的"缺少pywin32库"问题；错误信息更友好；新增requirements.txt依赖说明 |
 
 ---
 

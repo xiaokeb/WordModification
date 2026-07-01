@@ -1,0 +1,18 @@
+# Word 文本处理工具 - 依赖列表
+# 核心依赖（必须）
+python-docx>=0.8.11
+openpyxl>=3.0.0
+PyQt5>=5.15.0
+
+# PDF导出依赖（按优先级自动选择）
+# 方案1: pywin32 + Microsoft Excel（最佳效果，需要Windows + Excel）
+# pywin32>=300
+
+# 方案2: LibreOffice（跨平台，免费）
+# 从 https://www.libreoffice.org/ 下载安装
+
+# 方案3: reportlab（纯Python，备选方案，不需要Excel/LibreOffice）
+# reportlab>=3.6.0
+
+# 打包工具
+pyinstaller>=5.0.0

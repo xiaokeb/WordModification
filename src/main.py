@@ -422,26 +422,79 @@ class ExcelProcessor:
 # Excel转PDF处理器
 # ============================================================================
 class ExcelToPdfProcessor:
-    """Excel转PDF处理类，负责页面设置和PDF导出"""
+    """Excel转PDF处理类，负责页面设置和PDF导出
+
+    支持多种导出方式（按优先级尝试）：
+    1. pywin32 (COM) - 需要安装Microsoft Excel
+    2. LibreOffice命令行 - 需要安装LibreOffice
+    3. xlsx2pdf (纯Python) - 备选方案
+    """
 
     def __init__(self):
-        pass
+        self.method = None
+        self._detect_method()
+
+    def _detect_method(self):
+        """检测可用的PDF导出方法"""
+        # 1. 尝试pywin32
+        try:
+            import win32com.client
+            self.method = "pywin32"
+            return
+        except ImportError:
+            pass
+
+        # 2. 尝试LibreOffice
+        try:
+            import subprocess
+            # 检查LibreOffice是否安装
+            result = subprocess.run(
+                ["soffice", "--version"],
+                capture_output=True, timeout=5,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+            if result.returncode == 0:
+                self.method = "libreoffice"
+                return
+        except Exception:
+            pass
+
+        # 3. 使用纯Python方案（基于openpyxl + reportlab）
+        try:
+            import reportlab
+            self.method = "reportlab"
+            return
+        except ImportError:
+            pass
+
+        self.method = None
 
     def export_to_pdf(self, excel_path, output_path, callback=None):
         """将Excel文件导出为PDF
-        
-        设置所有工作表：
-        - 缩放：将所有列缩放为一页（FitToPagesWide=1, FitToPagesTall=0）
-        - 页边距：上下1.3cm，左右0.9cm
-        
+
+        自动选择可用的导出方法
+
         Args:
             excel_path: 输入Excel文件路径
             output_path: 输出PDF文件路径
             callback: 完成回调函数
-            
+
         Returns:
-            bool: 导出是否成功
+            tuple: (成功, 消息)
         """
+        if self.method is None:
+            return False, "无可用的PDF导出方法，请安装以下任一依赖：\n1. pywin32 + Microsoft Excel: pip install pywin32\n2. LibreOffice: https://www.libreoffice.org/\n3. reportlab: pip install reportlab"
+
+        if self.method == "pywin32":
+            return self._export_with_pywin32(excel_path, output_path, callback)
+        elif self.method == "libreoffice":
+            return self._export_with_libreoffice(excel_path, output_path, callback)
+        elif self.method == "reportlab":
+            return self._export_with_reportlab(excel_path, output_path, callback)
+        return False, "未知的导出方法"
+
+    def _export_with_pywin32(self, excel_path, output_path, callback=None):
+        """使用pywin32 (COM) 导出PDF"""
         try:
             import win32com.client
             import pythoncom
@@ -450,14 +503,15 @@ class ExcelToPdfProcessor:
             excel = win32com.client.Dispatch("Excel.Application")
             excel.Visible = False
             excel.DisplayAlerts = False
+            excel.ScreenUpdating = False
 
             wb = excel.Workbooks.Open(str(Path(excel_path).resolve()))
 
             for ws in wb.Worksheets:
-                # 设置页面缩放：将所有列缩放为一页，行数不限
+                # 设置页面缩放：将所有列缩放为一页
                 ws.PageSetup.FitToPagesWide = 1
                 ws.PageSetup.FitToPagesTall = 0
-                ws.PageSetup.Zoom = False  # 必须设为False才能使FitToPages生效
+                ws.PageSetup.Zoom = False
 
                 # 设置页边距（单位：厘米）
                 ws.PageSetup.TopMargin = excel.CentimetersToPoints(1.3)
@@ -465,37 +519,142 @@ class ExcelToPdfProcessor:
                 ws.PageSetup.LeftMargin = excel.CentimetersToPoints(0.9)
                 ws.PageSetup.RightMargin = excel.CentimetersToPoints(0.9)
 
-            # 选中所有工作表
             wb.Worksheets.Select()
-
-            # 导出为PDF
-            wb.ExportAsFixedFormat(0, str(Path(output_path).resolve()))  # 0 = xlTypePDF
+            wb.ExportAsFixedFormat(0, str(Path(output_path).resolve()))
 
             wb.Close(False)
             excel.Quit()
-
             pythoncom.CoUninitialize()
 
             if callback:
                 callback()
-
-            return True
-        except ImportError:
-            print("缺少 pywin32 库，请安装：pip install pywin32")
-            return False
+            return True, "导出成功"
         except Exception as e:
-            print(f"导出PDF失败 {excel_path}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            try:
-                excel.Quit()
-            except Exception:
-                pass
             try:
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
-            return False
+            return False, f"pywin32导出失败: {str(e)}"
+
+    def _export_with_libreoffice(self, excel_path, output_path, callback=None):
+        """使用LibreOffice命令行导出PDF"""
+        try:
+            import subprocess
+            output_dir = Path(output_path).parent
+            output_dir.mkdir(parents=True, exist_ok=True)
+
+            # LibreOffice转换命令
+            result = subprocess.run(
+                [
+                    "soffice",
+                    "--headless",
+                    "--convert-to", "pdf",
+                    "--outdir", str(output_dir),
+                    str(Path(excel_path).resolve())
+                ],
+                capture_output=True,
+                timeout=120,
+                creationflags=subprocess.CREATE_NO_WINDOW if hasattr(subprocess, 'CREATE_NO_WINDOW') else 0
+            )
+
+            if result.returncode != 0:
+                return False, f"LibreOffice转换失败: {result.stderr.decode('utf-8', errors='ignore')}"
+
+            # LibreOffice生成的PDF与原文件同名
+            generated_pdf = output_dir / (Path(excel_path).stem + ".pdf")
+            if generated_pdf.exists() and generated_pdf != Path(output_path):
+                # 重命名为目标文件名
+                if Path(output_path).exists():
+                    Path(output_path).unlink()
+                generated_pdf.rename(output_path)
+
+            if callback:
+                callback()
+            return True, "导出成功"
+        except Exception as e:
+            return False, f"LibreOffice导出失败: {str(e)}"
+
+    def _export_with_reportlab(self, excel_path, output_path, callback=None):
+        """使用纯Python (openpyxl + reportlab) 导出PDF
+
+        适用于没有安装pywin32和LibreOffice的环境
+        """
+        try:
+            from openpyxl import load_workbook
+            from reportlab.lib.pagesizes import A4, landscape
+            from reportlab.lib import colors
+            from reportlab.lib.units import cm
+            from reportlab.platypus import SimpleDocTemplate, Table, TableStyle, PageBreak
+            from reportlab.pdfbase import pdfmetrics
+            from reportlab.pdfbase.cidfonts import UnicodeCIDFont
+
+            # 注册中文字体
+            try:
+                pdfmetrics.registerFont(UnicodeCIDFont('STSong-Light'))
+                chinese_font = 'STSong-Light'
+            except Exception:
+                chinese_font = 'Helvetica'
+
+            # 加载Excel
+            wb = load_workbook(str(excel_path), data_only=True)
+
+            # 创建PDF（横向A4）
+            doc = SimpleDocTemplate(
+                str(output_path),
+                pagesize=landscape(A4),
+                leftMargin=0.9 * cm,
+                rightMargin=0.9 * cm,
+                topMargin=1.3 * cm,
+                bottomMargin=1.3 * cm
+            )
+
+            elements = []
+
+            for sheet_idx, ws in enumerate(wb.worksheets):
+                if sheet_idx > 0:
+                    elements.append(PageBreak())
+
+                # 提取数据
+                data = []
+                for row in ws.iter_rows(values_only=True):
+                    row_data = [str(cell) if cell is not None else "" for cell in row]
+                    if any(cell for cell in row_data):
+                        data.append(row_data)
+
+                if not data:
+                    data = [["（空工作表）"]]
+
+                # 计算列宽（根据内容自适应）
+                max_cols = max(len(row) for row in data)
+                # 填充到统一列数
+                for row in data:
+                    while len(row) < max_cols:
+                        row.append("")
+
+                # 创建表格
+                available_width = landscape(A4)[0] - 1.8 * cm
+                col_width = available_width / max_cols if max_cols > 0 else available_width
+
+                table = Table(data, repeatRows=1, colWidths=[col_width] * max_cols)
+                table.setStyle(TableStyle([
+                    ('FONT', (0, 0), (-1, -1), chinese_font, 8),
+                    ('GRID', (0, 0), (-1, -1), 0.5, colors.grey),
+                    ('BACKGROUND', (0, 0), (-1, 0), colors.lightblue),
+                    ('VALIGN', (0, 0), (-1, -1), 'MIDDLE'),
+                    ('ALIGN', (0, 0), (-1, -1), 'CENTER'),
+                ]))
+
+                elements.append(table)
+
+            doc.build(elements)
+
+            if callback:
+                callback()
+            return True, "导出成功"
+        except ImportError as e:
+            return False, f"缺少依赖库: {str(e)}\n请安装: pip install reportlab"
+        except Exception as e:
+            return False, f"reportlab导出失败: {str(e)}"
 
 
 # ============================================================================
@@ -687,13 +846,17 @@ class SuffixModifyThread(QThread):
 
 
 class ExportPdfThread(QThread):
-    """PDF导出后台线程，避免阻塞UI和COM线程问题"""
+    """PDF导出后台线程，避免阻塞UI和COM线程问题
+
+    自动检测可用的导出方法（pywin32/LibreOffice/reportlab），
+    优先使用pywin32，无依赖时回退到纯Python方案
+    """
     progress_updated = pyqtSignal(int, str)
     export_complete = pyqtSignal(bool, str)
 
     def __init__(self, excel_path, output_path):
         """初始化PDF导出线程
-        
+
         Args:
             excel_path: 输入Excel文件路径
             output_path: 输出PDF文件路径
@@ -705,80 +868,89 @@ class ExportPdfThread(QThread):
         self._error_message = ""
 
     def run(self):
-        """线程执行方法：使用openpyxl生成PDF占位（实际由WordProcessor风格的COM操作）"""
+        """线程执行方法：自动选择最佳导出方法"""
         try:
-            self.progress_updated.emit(10, "正在准备导出...")
+            # 懒加载PDF处理器
+            from main import ExcelToPdfProcessor
+            processor = ExcelToPdfProcessor()
 
-            # 在线程中初始化COM
+            self.progress_updated.emit(10, f"正在准备导出（使用 {processor.method or '未知'} 方法）...")
+
+            # 定义进度回调
+            def progress_cb():
+                self.progress_updated.emit(80, "正在生成PDF...")
+
+            # 使用pywin32时按阶段显示进度
+            if processor.method == "pywin32":
+                self.progress_updated.emit(30, "正在启动Excel...")
+                success, message = self._export_with_progress_pywin32(processor)
+            else:
+                self.progress_updated.emit(50, "正在处理文件...")
+                success, message = processor.export_to_pdf(
+                    self.excel_path,
+                    self.output_path,
+                    progress_cb
+                )
+
+            if success:
+                self.progress_updated.emit(100, "导出完成")
+                self.export_complete.emit(True, self.output_path)
+            else:
+                self.export_complete.emit(False, message)
+
+        except Exception as e:
+            error_msg = f"导出过程出错: {str(e)}"
+            print(f"导出PDF失败 {self.excel_path}: {str(e)}")
+            import traceback
+            traceback.print_exc()
+            self.export_complete.emit(False, error_msg)
+
+    def _export_with_progress_pywin32(self, processor):
+        """使用pywin32导出并显示进度"""
+        try:
             import win32com.client
             import pythoncom
             pythoncom.CoInitialize()
 
-            self.progress_updated.emit(30, "正在启动Excel...")
+            self.progress_updated.emit(40, "正在打开文件...")
 
             excel = win32com.client.Dispatch("Excel.Application")
             excel.Visible = False
             excel.DisplayAlerts = False
             excel.ScreenUpdating = False
 
-            self.progress_updated.emit(50, "正在打开文件...")
-
             wb = excel.Workbooks.Open(str(Path(self.excel_path).resolve()))
 
-            self.progress_updated.emit(70, "正在设置页面...")
+            self.progress_updated.emit(60, "正在设置页面...")
 
             for ws in wb.Worksheets:
-                # 设置页面缩放：将所有列缩放为一页，行数不限
                 ws.PageSetup.FitToPagesWide = 1
                 ws.PageSetup.FitToPagesTall = 0
                 ws.PageSetup.Zoom = False
-
-                # 设置页边距（单位：厘米）
                 ws.PageSetup.TopMargin = excel.CentimetersToPoints(1.3)
                 ws.PageSetup.BottomMargin = excel.CentimetersToPoints(1.3)
                 ws.PageSetup.LeftMargin = excel.CentimetersToPoints(0.9)
                 ws.PageSetup.RightMargin = excel.CentimetersToPoints(0.9)
 
-            # 选中所有工作表
             wb.Worksheets.Select()
 
-            self.progress_updated.emit(85, "正在导出PDF...")
+            self.progress_updated.emit(80, "正在导出PDF...")
 
-            # 导出为PDF (0 = xlTypePDF)
             wb.ExportAsFixedFormat(0, str(Path(self.output_path).resolve()))
 
             self.progress_updated.emit(95, "正在关闭Excel...")
 
             wb.Close(False)
             excel.Quit()
-
             pythoncom.CoUninitialize()
 
-            self.progress_updated.emit(100, "导出完成")
-            self.export_complete.emit(True, self.output_path)
-
-        except ImportError as e:
-            self._error_message = "缺少pywin32库，请安装：pip install pywin32"
-            print(self._error_message)
-            try:
-                pythoncom.CoUninitialize()
-            except Exception:
-                pass
-            self.export_complete.emit(False, self._error_message)
+            return True, "导出成功"
         except Exception as e:
-            self._error_message = f"导出失败: {str(e)}"
-            print(f"导出PDF失败 {self.excel_path}: {str(e)}")
-            import traceback
-            traceback.print_exc()
-            try:
-                excel.Quit()
-            except Exception:
-                pass
             try:
                 pythoncom.CoUninitialize()
             except Exception:
                 pass
-            self.export_complete.emit(False, self._error_message)
+            return False, f"pywin32导出失败: {str(e)}"
 
 
 # ============================================================================
@@ -802,7 +974,7 @@ class WordProcessorGUI(QMainWindow):
         self.processor = WordProcessor()
         self.excel_processor = ExcelProcessor()
         self.suffix_processor = SuffixProcessor()
-        self.pdf_processor = None  # 延迟初始化，避免启动时加载pywin32
+        self.pdf_processor = None  # 延迟初始化，首次使用PDF功能时创建
 
         # 状态变量
         self.selected_files = []
@@ -816,6 +988,16 @@ class WordProcessorGUI(QMainWindow):
         # 初始化界面
         self._init_styles()
         self._create_main_layout()
+
+    def _get_pdf_processor(self):
+        """懒加载获取PDF处理器
+
+        Returns:
+            ExcelToPdfProcessor: PDF处理器实例
+        """
+        if self.pdf_processor is None:
+            self.pdf_processor = ExcelToPdfProcessor()
+        return self.pdf_processor
 
     def _init_styles(self):
         """初始化界面样式"""
@@ -1859,11 +2041,31 @@ class WordProcessorGUI(QMainWindow):
         self.export_pdf_btn.clicked.connect(self._start_export_pdf)
         self.export_pdf_btn.setFixedHeight(33)
         self.export_pdf_btn.setMinimumWidth(100)
+        # 根据可用方法更新按钮提示
+        try:
+            from main import ExcelToPdfProcessor
+            temp_processor = ExcelToPdfProcessor()
+            method_names = {
+                "pywin32": "pywin32",
+                "libreoffice": "LibreOffice",
+                "reportlab": "reportlab",
+                None: "无（请安装pywin32或reportlab）"
+            }
+            method = temp_processor.method
+            self.export_pdf_btn.setToolTip(f"PDF导出方法：{method_names.get(method, '未知')}")
+            self.one_click_convert_btn_tooltip = f"一键转换使用：{method_names.get(method, '无可用方法')}"
+        except Exception:
+            self.export_pdf_btn.setToolTip("PDF导出（首次使用时会自动检测可用方法）")
 
         self.one_click_convert_btn = QPushButton("一键转换")
         self.one_click_convert_btn.clicked.connect(self._start_one_click_convert)
         self.one_click_convert_btn.setFixedHeight(33)
         self.one_click_convert_btn.setMinimumWidth(100)
+        # 复用导出按钮的tooltip
+        try:
+            self.one_click_convert_btn.setToolTip(self.export_pdf_btn.toolTip())
+        except Exception:
+            pass
 
         btn_layout.addStretch()
         btn_layout.addWidget(self.write_number_btn)
@@ -2085,7 +2287,8 @@ class WordProcessorGUI(QMainWindow):
         else:
             self.number_progress_label.setText("PDF导出失败")
             self.number_progress_label.setStyleSheet(f"color: {self.error_color}; font-size: 8pt;")
-            QMessageBox.critical(self, "错误", f"PDF导出失败：\n{result}\n\n请检查：\n1. Excel文件是否被占用\n2. 输出路径是否有写入权限\n3. 是否已安装Microsoft Excel\n4. pywin32库是否已安装")
+            # result 是错误信息
+            QMessageBox.critical(self, "错误", f"PDF导出失败：\n\n{result}")
 
     def _start_one_click_convert(self):
         """一键转换：先写入编号，再导出PDF
@@ -2106,7 +2309,7 @@ class WordProcessorGUI(QMainWindow):
         # 先执行写入编号
         self.number_settings["number_format"] = number_format
 
-        number_text = self._generate_number_text()
+        number_text = self._generate_number()
 
         use_fixed_mode = self.number_mode == "fixed"
         fixed_number = getattr(self, 'fixed_number_edit', None)

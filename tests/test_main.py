@@ -394,11 +394,63 @@ class TestExcelToPdfProcessor(unittest.TestCase):
         except ImportError:
             self.skipTest("pywin32 未安装")
 
-        success = self.processor.export_to_pdf(
+        success, message = self.processor.export_to_pdf(
             "/nonexistent/file.xlsx",
             str(Path(self.test_dir) / "output.pdf")
         )
         self.assertFalse(success)
+        self.assertIsNotNone(message)
+
+    def test_detect_method(self):
+        """测试方法检测功能"""
+        # 至少检测到一种方法（pywin32/libreoffice/reportlab）
+        # 如果都没有，method应为None
+        self.assertTrue(hasattr(self.processor, 'method'))
+        # 验证检测结果有效
+        valid_methods = [None, "pywin32", "libreoffice", "reportlab"]
+        self.assertIn(self.processor.method, valid_methods)
+
+    def test_no_method_message(self):
+        """测试无可用方法时的错误信息"""
+        # 模拟所有方法都不可用
+        original_method = self.processor.method
+        self.processor.method = None
+        try:
+            success, message = self.processor.export_to_pdf(
+                str(Path(self.test_dir) / "test.xlsx"),
+                str(Path(self.test_dir) / "output.pdf")
+            )
+            self.assertFalse(success)
+            self.assertIn("无可用的PDF导出方法", message)
+        finally:
+            self.processor.method = original_method
+
+    def test_export_with_reportlab(self):
+        """测试使用reportlab导出PDF（无需pywin32）"""
+        try:
+            from openpyxl import Workbook
+        except ImportError:
+            self.skipTest("缺少 openpyxl 库")
+
+        # 创建测试Excel
+        wb = Workbook()
+        wb.active["A1"] = "测试"
+        excel_path = Path(self.test_dir) / "test.xlsx"
+        wb.save(str(excel_path))
+
+        output_path = Path(self.test_dir) / "output.pdf"
+
+        # 直接调用reportlab导出
+        if hasattr(self.processor, '_export_with_reportlab'):
+            success, message = self.processor._export_with_reportlab(
+                str(excel_path), str(output_path)
+            )
+            # 可能因为reportlab未安装而失败，但不应崩溃
+            if success:
+                self.assertTrue(output_path.exists())
+            else:
+                # 如果失败，应有明确错误信息
+                self.assertIsInstance(message, str)
 
 
 class TestUtilityFunctions(unittest.TestCase):
